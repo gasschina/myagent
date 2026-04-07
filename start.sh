@@ -13,28 +13,24 @@ if ! command -v python3 &> /dev/null; then
 fi
 
 # 检查依赖
-if ! python3 -c "import yaml" &> /dev/null; then
+if ! python3 -c "import openai" &> /dev/null; then
     echo "[提示] 正在安装依赖..."
     pip3 install -r requirements.txt
-fi
-
-# 检查配置
-if [ ! -f config.yaml ]; then
-    echo "[提示] 未找到 config.yaml，使用默认配置"
-    echo "[提示] 请编辑 config.yaml 填入你的 API Key"
 fi
 
 echo ""
 echo "选择运行模式:"
 echo "  1. CLI 交互模式"
-echo "  2. 系统托盘模式"
-echo "  3. HTTP API 模式"
+echo "  2. 系统托盘模式 (推荐)"
+echo "  3. Web 管理后台模式"
+echo "  4. 设置开机自启"
 echo ""
-read -p "请输入 (1/2/3): " mode
+read -p "请输入 (1/2/3/4): " mode
 
 case $mode in
     1) python3 main.py ;;
     2) python3 main.py --tray ;;
-    3) python3 main.py --server --port 8080 ;;
+    3) python3 main.py --web ;;
+    4) python3 main.py --autostart ;;
     *) echo "无效选择" ;;
 esac

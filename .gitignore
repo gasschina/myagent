@@ -1,4 +1,4 @@
-# 忽略文件
+# MyAgent Data
 __pycache__/
 *.pyc
 *.pyo
@@ -6,25 +6,17 @@ __pycache__/
 dist/
 build/
 *.egg
-
-# 数据目录
-data/
+.eggs/
+# Logs
 logs/
-
+# Database
+data/*.db
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
-
-# 系统文件
+# OS
 .DS_Store
 Thumbs.db
-
-# 用户本地配置 (包含真实 API Key)
-# config.yaml  # 取消注释以忽略本地配置
-config.local.yaml
-
-# 打包
-*.spec
+__pycache__/

@@ -1,243 +1,333 @@
-# MyAgent - 本地桌面端执行型 AI 助手
+# MyAgent - 本地桌面端执行型AI助手
 
-## 概述
+> 🤖 一个执行力极强、记忆力极强、运行稳定的本地桌面端AI助手。
+> 支持 Windows / macOS / Linux，系统托盘后台运行。
+> Open Interpreter 风格执行引擎 + 三层记忆系统 + 多Agent架构 + 多平台接入。
 
-MyAgent 是一个功能强大的本地桌面端 AI 助手，具有极强的执行力和记忆力。
+---
 
-### 核心特性
+## 🌟 核心特性
 
-- 🚀 **Open Interpreter 风格执行引擎** - 支持 Python / Shell / PowerShell 代码直接执行
-- 🧠 **三层记忆系统** - 短期/工作/长期记忆 + SQLite 持久化
-- 🤖 **多Agent架构** - MasterAgent / ToolAgent / MemoryAgent 协同工作
-- 💬 **多平台聊天接入** - Telegram / Discord / 飞书 / QQ / 微信
-- 🔧 **技能系统** - OpenClaw 风格 JSON 结构化技能调用
-- 🖥️ **系统托盘** - 后台运行、开机自启
-- 🛡️ **稳定可靠** - 错误自动修复、重试机制、死循环检测
+### 🚀 执行引擎
+- **多语言执行**: Python / Shell (Bash) / PowerShell / CMD
+- **自动修复**: ImportError 自动安装、编码修复、缩进修复
+- **安全控制**: 危险命令拦截、超时控制、输出截断
+- **结构化结果**: 执行结果标准化，LLM 稳定理解
 
-## 快速开始
+### 🧠 三层记忆系统
+- **短期记忆**: 对话上下文，自动淘汰旧消息
+- **工作记忆**: 任务进度、执行步骤、中间结果
+- **长期记忆**: 用户偏好、技能经验、错误模式
+- **SQLite 持久化**: 本地存储，支持跨会话检索
+
+### 🤝 多Agent架构
+- **主Agent**: 任务规划、Agent调度、结果汇总
+- **工具Agent**: 代码执行、技能调用、文件操作
+- **记忆Agent**: 记忆读写、经验总结、错误记录
+- **计划-执行-反思循环**: 自动迭代直到完成
+
+### 💬 多聊天平台接入
+- **Telegram**: 官方 Bot API
+- **Discord**: discord.py
+- **飞书**: Webhook 长连接
+- **QQ**: OneBot v11 协议
+- **微信**: WxPusher / HTTP 桥接
+- 纯 Python 实现，无需 Node.js
+
+### 🛠️ 技能系统 (OpenClaw 兼容)
+- **文件操作**: 读写、搜索、移动、删除
+- **网络搜索**: DuckDuckGo 免API搜索
+- **系统操作**: 信息查询、进程管理、环境变量
+- **浏览器自动化**: Playwright 驱动
+- JSON Schema 定义，支持 LLM Function Calling
+
+### 🛡️ 稳定性保障
+- 任务队列机制 (优先级调度)
+- 执行超时控制
+- 异常捕获与自动恢复
+- LLM 输出 JSON 格式强校验
+- 无 HTTP 网关、单机原生运行
+
+### 📱 系统托盘
+- 后台静默运行
+- 开机自启支持
+- 日志目录快捷访问
+- 可打包为 exe / dmg
+
+---
+
+## 📁 项目结构
+
+```
+myagent/
+├── main.py                 # 主入口 + 系统托盘 + CLI
+├── config.py               # 配置管理 (环境变量/配置文件/默认值)
+│
+├── core/                   # 核心模块
+│   ├── llm.py              # LLM 客户端 (OpenAI/Anthropic/Ollama)
+│   ├── task_queue.py       # 任务队列
+│   ├── logger.py           # 日志系统
+│   └── utils.py            # 工具函数
+│
+├── memory/                 # 记忆系统
+│   └── manager.py          # 三层记忆管理器 (SQLite)
+│
+├── executor/               # 执行引擎
+│   └── engine.py           # 代码执行器 (Python/Shell/PowerShell)
+│
+├── agents/                 # Agent 架构
+│   ├── base.py             # Agent 基类
+│   ├── main_agent.py       # 主Agent (规划调度)
+│   ├── tool_agent.py       # 工具Agent (执行调用)
+│   └── memory_agent.py     # 记忆Agent (读写总结)
+│
+├── chatbot/                # 聊天平台接入
+│   ├── base.py             # 平台基类
+│   ├── manager.py          # 平台管理器
+│   ├── telegram_bot.py     # Telegram
+│   ├── discord_bot.py      # Discord
+│   ├── feishu_bot.py       # 飞书
+│   ├── qq_bot.py           # QQ
+│   └── wechat_bot.py       # 微信
+│
+├── skills/                 # 技能系统
+│   ├── base.py             # 技能基类 (OpenClaw 兼容)
+│   ├── registry.py         # 技能注册表
+│   ├── file_skill.py       # 文件操作
+│   ├── search_skill.py     # 搜索技能
+│   ├── system_skill.py     # 系统操作
+│   └── browser_skill.py    # 浏览器自动化
+│
+├── requirements.txt        # 依赖清单
+├── setup.py                # 打包配置
+└── README.md               # 本文件
+```
+
+---
+
+## 🚀 快速开始
 
 ### 1. 安装依赖
 
 ```bash
+# 克隆项目
+git clone https://github.com/ctz168/myagent.git
+cd myagent
+
+# 安装核心依赖
 pip install -r requirements.txt
+
+# 按需安装聊天平台
+pip install python-telegram-bot   # Telegram
+pip install discord.py            # Discord
+pip install playwright && playwright install chromium  # 浏览器
+pip install anthropic            # Claude
 ```
 
-### 2. 配置 API Key
+### 2. 配置 LLM
 
-编辑 `config.yaml`，填入你的 LLM API Key:
-
-```yaml
-llm:
-  api_key: "your-api-key-here"
-  model: gpt-4o
+**方式一: 环境变量 (推荐)**
+```bash
+export MYAGENT_LLM_API_KEY="sk-your-openai-key"
+export MYAGENT_LLM_MODEL="gpt-4"
 ```
 
-支持多种 LLM 提供商:
-- **OpenAI** (默认): GPT-4o, GPT-4, GPT-3.5
-- **智谱AI**: GLM-4, GLM-3
-- **自定义 API**: 任何 OpenAI 兼容的 API
+**方式二: 配置文件**
+```bash
+# 首次运行会自动创建 ~/.myagent/config.json
+python main.py
+```
+
+**方式三: 使用 Ollama 本地模型 (免费)**
+```bash
+# 安装 Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+ollama pull llama3
+
+# 配置
+export MYAGENT_LLM_PROVIDER="ollama"
+export MYAGENT_OLLAMA_MODEL="llama3"
+```
+
+**方式四: 使用 Anthropic Claude**
+```bash
+export MYAGENT_LLM_PROVIDER="anthropic"
+export MYAGENT_ANTHROPIC_API_KEY="sk-ant-..."
+```
 
 ### 3. 运行
 
 ```bash
-# CLI 交互模式
+# 交互式命令行
 python main.py
 
-# 系统托盘模式 (后台运行)
+# 系统托盘后台运行
 python main.py --tray
 
-# HTTP API 模式
-python main.py --server --port 8080
+# 调试模式
+python main.py --debug
+
+# 设置开机自启
+python main.py --autostart
 ```
 
-## 运行模式
+### 4. 配置聊天平台 (可选)
 
-### CLI 模式 (默认)
-直接在终端中与 AI 助手对话，支持命令行指令。
+编辑 `~/.myagent/config.json`:
 
-### 系统托盘模式 (`--tray`)
-在系统托盘中后台运行，右键图标可查看状态、打开日志、重启、退出。
+```json
+{
+  "llm": {
+    "provider": "openai",
+    "api_key": "sk-...",
+    "model": "gpt-4"
+  },
+  "chat_platforms": [
+    {
+      "platform": "telegram",
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN"
+    },
+    {
+      "platform": "discord",
+      "enabled": true,
+      "token": "YOUR_DISCORD_BOT_TOKEN"
+    }
+  ]
+}
+```
 
-### HTTP API 模式 (`--server`)
-启动 HTTP 服务，可通过 API 调用:
-
+或使用环境变量:
 ```bash
-# 发送消息
-curl -X POST http://127.0.0.1:8080/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "帮我查看系统信息", "session_id": "test"}'
-
-# 查看统计
-curl http://127.0.0.1:8080/api/stats
-
-# 健康检查
-curl http://127.0.0.1:8080/api/health
+export MYAGENT_TELEGRAM_TOKEN="your-telegram-bot-token"
+export MYAGENT_DISCORD_TOKEN="your-discord-bot-token"
 ```
 
-## 聊天平台接入
+---
 
-### Telegram
-1. 在 Telegram 中找 @BotFather 创建 Bot
-2. 获取 Bot Token
-3. 配置 `config.yaml`:
+## 💡 使用示例
 
-```yaml
-chatbot:
-  telegram:
-    enabled: true
-    bot_token: "your-bot-token"
-    allowed_users: ["your-user-id"]  # 安全: 限制用户
+### CLI 交互
+```
+👤 你: 帮我在桌面创建一个 hello.py 文件
+🤖 助手: ✅ 已在桌面创建 hello.py
+
+👤 你: 搜索最新的Python 3.12新特性
+🤖 助手: [搜索结果...]
+
+👤 你: 查看系统信息
+🤖 助手: 系统: macOS 14.0 | CPU: 8核 | 内存: 12.3GB可用
 ```
 
-### Discord
-1. 在 Discord Developer Portal 创建 Application
-2. 创建 Bot 并获取 Token
-3. 邀请 Bot 到服务器
-4. 配置 `config.yaml`:
+### CLI 内置命令
+| 命令 | 说明 |
+|------|------|
+| `help` | 显示帮助 |
+| `status` | 查看系统状态 |
+| `skills` | 列出所有技能 |
+| `memory` | 查看记忆统计 |
+| `sessions` | 查看会话列表 |
+| `session <id>` | 切换会话 |
+| `clear` | 清除当前对话历史 |
+| `quit` | 退出 |
 
-```yaml
-chatbot:
-  discord:
-    enabled: true
-    bot_token: "your-bot-token"
-    allowed_channels: ["channel-id"]
+### 技能调用
+```
+# 直接调用技能
+👤 你: !system_info
+👤 你: !file_read path=/tmp/test.txt
+👤 你: !web_search query=AI news
 ```
 
-### 飞书
-1. 在飞书开放平台创建应用
-2. 获取 App ID 和 App Secret
-3. 配置 `config.yaml`:
+---
 
-```yaml
-chatbot:
-  feishu:
-    enabled: true
-    app_id: "your-app-id"
-    app_secret: "your-app-secret"
+## 🏗️ 扩展开发
+
+### 添加自定义技能
+```python
+# skills/my_skill.py
+from skills.base import Skill, SkillResult, SkillParameter
+
+class MyCustomSkill(Skill):
+    name = "my_skill"
+    description = "我的自定义技能"
+    category = "custom"
+    parameters = [
+        SkillParameter("input", "string", "输入参数", required=True),
+    ]
+
+    async def execute(self, input: str = "", **kwargs) -> SkillResult:
+        # 你的逻辑
+        return SkillResult(
+            success=True,
+            data={"result": input.upper()},
+            message=f"处理完成: {input}",
+        )
 ```
 
-### QQ
-1. 在 QQ 开放平台注册机器人
-2. 配置 `config.yaml`:
+技能会自动被发现和注册 (命名规则: `*_skill.py`)。
 
-```yaml
-chatbot:
-  qq:
-    enabled: true
-    bot_appid: "your-appid"
-    bot_token: "your-token"
+### 添加自定义聊天平台
+```python
+# chatbot/my_platform_bot.py
+from chatbot.base import BaseChatBot, ChatMessage, ChatResponse
+
+class MyPlatformBot(BaseChatBot):
+    platform_name = "my_platform"
+
+    async def start(self):
+        # 实现启动逻辑
+        pass
+
+    async def stop(self):
+        pass
+
+    async def send_message(self, response: ChatResponse) -> bool:
+        pass
 ```
 
-### 微信
-微信通过第三方 HTTP API 接入 (如 wechaty)，配置 API 地址即可:
+然后在 `chatbot/manager.py` 中注册即可。
 
-```yaml
-chatbot:
-  wechat:
-    enabled: true
-    api_url: "http://your-wechat-api:3000"
-    api_token: "your-token"
-```
+---
 
-## 内置技能
-
-| 技能名 | 说明 | 参数 |
-|--------|------|------|
-| `run_code` | 执行代码 (自动检测语言) | code, language, work_dir, timeout |
-| `run_python` | 执行 Python 代码 | code, work_dir, timeout |
-| `run_shell` | 执行 Shell 命令 | code, work_dir, timeout |
-| `run_powershell` | 执行 PowerShell | code, work_dir, timeout |
-| `read_file` | 读取文件内容 | path, encoding, offset, limit |
-| `write_file` | 写入文件 | path, content, append |
-| `list_directory` | 列出目录 | path, pattern, recursive |
-| `delete_file` | 删除文件/目录 | path |
-| `move_file` | 移动/重命名文件 | source, destination |
-| `search_in_files` | 在文件中搜索 | directory, pattern, file_pattern |
-| `web_search` | 搜索互联网 | query, num |
-| `url_fetch` | 获取网页内容 | url |
-| `get_system_info` | 获取系统信息 | - |
-| `get_env` | 获取环境变量 | name |
-| `set_env` | 设置环境变量 | name, value |
-| `process_list` | 列出进程 | - |
-| `disk_usage` | 磁盘使用情况 | path |
-| `http_request` | 发送 HTTP 请求 | url, method, headers, body |
-| `check_connectivity` | 网络连通性检查 | host, port |
-| `text_analyze` | 文本分析 | text |
-| `text_transform` | 文本转换 | text, operation |
-
-## 项目结构
-
-```
-myagent/
-├── main.py           # 主入口 (CLI/托盘/HTTP API)
-├── config.py         # 配置管理
-├── agent.py          # 多Agent架构
-├── memory.py         # 记忆系统
-├── executor.py       # 执行引擎
-├── skills.py         # 技能系统
-├── llm.py            # LLM 接口层
-├── chatbot.py        # 聊天平台接入
-├── task_queue.py     # 任务队列
-├── config.yaml       # 配置文件
-├── requirements.txt  # 依赖清单
-├── __init__.py
-├── skills/
-│   └── __init__.py
-├── agents/
-│   └── __init__.py
-├── data/             # 数据目录 (SQLite DB等)
-└── logs/             # 日志目录
-```
-
-## 打包部署
+## 📦 打包
 
 ### Windows (exe)
 ```bash
 pip install pyinstaller
 pyinstaller --onefile --windowed --icon=icon.ico \
-  --name MyAgent \
-  --hidden-import=pystray._win32 \
-  --hidden-import=PIL \
-  main.py
+    --add-data "skills:skills" \
+    --add-data "chatbot:chatbot" \
+    --name MyAgent main.py
 ```
 
 ### macOS (dmg)
 ```bash
-pip install pyinstaller
 pyinstaller --onefile --windowed --icon=icon.icns \
-  --name MyAgent \
-  --osx-bundle-identifier=com.myagent.app \
-  main.py
+    --add-data "skills:skills" \
+    --name MyAgent main.py
+# 然后使用 hdiutil 创建 dmg
 ```
 
-## 安全说明
+---
 
-- 默认阻止危险系统命令 (rm -rf /, format 等)
-- 可配置命令白名单/黑名单
-- 聊天平台支持用户白名单
-- 代码执行有超时控制
-- 自动检测 fork bomb 等恶意模式
+## ⚙️ 环境变量参考
 
-## 环境变量
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `MYAGENT_LLM_PROVIDER` | LLM 提供商 | openai |
+| `MYAGENT_LLM_API_KEY` | API Key | - |
+| `MYAGENT_LLM_BASE_URL` | API 地址 | OpenAI 官方 |
+| `MYAGENT_LLM_MODEL` | 模型名称 | gpt-4 |
+| `MYAGENT_LLM_TEMPERATURE` | 温度 | 0.1 |
+| `MYAGENT_TELEGRAM_TOKEN` | Telegram Bot Token | - |
+| `MYAGENT_DISCORD_TOKEN` | Discord Bot Token | - |
+| `MYAGENT_FEISHU_APP_ID` | 飞书 App ID | - |
+| `MYAGENT_FEISHU_APP_SECRET` | 飞书 App Secret | - |
+| `MYAGENT_LOG_LEVEL` | 日志级别 | INFO |
 
-可通过环境变量覆盖配置 (优先级最高):
+---
 
-```bash
-export MYAGENT_LLM_API_KEY="your-key"
-export MYAGENT_LLM_MODEL="gpt-4o"
-export MYAGENT_APP_LOG_LEVEL="DEBUG"
-```
-
-## 技术栈
-
-- **Python 3.8+**
-- **SQLite** - 数据持久化
-- **pystray** - 系统托盘
-- **Pillow** - 图标生成
-- **websocket-client** - WebSocket (Discord/QQ)
-- **urllib** - HTTP 请求 (标准库，无额外依赖)
-- **yaml** - 配置文件
-
-## License
+## 📄 License
 
 MIT

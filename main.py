@@ -1,649 +1,742 @@
 """
-MyAgent - 本地桌面端执行型 AI 助手
-====================================
-主入口: 系统托盘后台运行 + CLI 交互
-支持 Windows / macOS 双平台
+main.py - MyAgent 主入口
+==========================
+本地桌面端执行型AI助手。
+支持:
+  - 系统托盘后台运行 (pystray)
+  - 交互式命令行
+  - 多聊天平台接入
+  - Windows / macOS / Linux
 """
+from __future__ import annotations
+
+import asyncio
 import os
 import sys
-import json
-import time
 import signal
-import logging
 import threading
-import platform
 from pathlib import Path
-from typing import Optional
 
 # 确保项目根目录在 Python 路径中
 PROJECT_ROOT = Path(__file__).parent.resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import init_config, get_config, Config
-from memory import MemoryManager, MemoryStore
-from executor import Executor
-from skills import SkillRegistry, BuiltinSkills
-from llm import LLMClient, init_llm, get_llm
-from agent import AgentController, MasterAgent, ToolAgent, MemoryAgent
-from chatbot import ChatBotManager
-from task_queue import TaskQueue
+from config import get_config, ConfigManager
+from core.logger import setup_logger, get_logger
+from core.llm import LLMClient, Message
+from core.task_queue import TaskQueue
+from memory.manager import MemoryManager
+from executor.engine import ExecutionEngine
+from skills.registry import SkillRegistry
+from agents.main_agent import MainAgent
+from agents.tool_agent import ToolAgent
+from agents.memory_agent import MemoryAgent
+from chatbot.base import ChatMessage, ChatResponse
+from chatbot.manager import ChatBotManager
+from core.utils import timestamp, detect_platform
 
 
-# ============================================================
-# 日志配置
-# ============================================================
+# ==============================================================================
+# MyAgent 应用主类
+# ==============================================================================
 
-def setup_logging(config: Config) -> logging.Logger:
-    """配置日志系统"""
-    log_level = config.get("app.log_level", "INFO")
-    log_file = config.get("app.log_file", "logs/myagent.log")
-
-    # 确保日志目录存在
-    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-
-    # 配置根日志
-    root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-
-    # 文件处理器
-    from logging.handlers import RotatingFileHandler
-    max_size = config.get("app.max_log_size_mb", 50) * 1024 * 1024
-    backup_count = config.get("app.log_backup_count", 5)
-
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=max_size,
-        backupCount=backup_count,
-        encoding='utf-8',
-    )
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    ))
-    root_logger.addHandler(file_handler)
-
-    # 控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(logging.Formatter(
-        '[%(levelname)s] %(message)s'
-    ))
-    root_logger.addHandler(console_handler)
-
-    logger = logging.getLogger("myagent")
-    logger.info(f"MyAgent v{config.get('app.version', '1.0.0')} 启动")
-    logger.info(f"平台: {platform.system()} {platform.release()}")
-    logger.info(f"Python: {platform.python_version()}")
-    logger.info(f"工作目录: {os.getcwd()}")
-
-    return logger
-
-
-# ============================================================
-# 系统托盘
-# ============================================================
-
-class TrayApp:
+class MyAgentApp:
     """
-    系统托盘应用
-    使用 pystray 实现后台运行
+    MyAgent 应用主类。
+
+    管理:
+      - LLM 客户端
+      - 记忆系统
+      - 执行引擎
+      - 技能系统
+      - Agent 集群
+      - 聊天平台
+      - 系统托盘
+      - 任务队列
     """
 
-    def __init__(self, agent: AgentController, chatbot_manager: ChatBotManager, logger_instance):
-        self.agent = agent
-        self.chatbot_manager = chatbot_manager
-        self.logger = logger_instance
-        self._tray = None
-        self._is_running = True
-        self._status = "运行中"
+    def __init__(self):
+        self.config_mgr = get_config()
+        self.config = self.config_mgr.config
+        self.logger = None
+        self._running = False
 
-    def create_icon(self):
-        """创建托盘图标 (程序化生成)"""
-        try:
-            from PIL import Image, ImageDraw, ImageFont
+        # 核心组件
+        self.memory: MemoryManager | None = None
+        self.executor: ExecutionEngine | None = None
+        self.skill_registry: SkillRegistry | None = None
+        self.llm: LLMClient | None = None
+        self.task_queue: TaskQueue | None = None
 
-            # 创建一个简单的图标
-            size = 64
-            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
+        # Agent
+        self.main_agent: MainAgent | None = None
+        self.tool_agent: ToolAgent | None = None
+        self.memory_agent: MemoryAgent | None = None
 
-            # 背景圆
-            draw.ellipse([4, 4, 60, 60], fill=(52, 152, 219, 255))
+        # 聊天平台
+        self.chat_manager: ChatBotManager | None = None
 
-            # "M" 字母
-            try:
-                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc" if platform.system() == "Darwin" else "arial.ttf", 32)
-            except:
-                font = ImageFont.load_default()
+        # 交互式会话
+        self._session_id = "cli_default"
 
-            draw.text((12, 12), "M", fill=(255, 255, 255, 255), font=font)
+    async def initialize(self):
+        """初始化所有组件"""
+        # 1. 日志
+        self.logger = setup_logger(
+            "myagent",
+            log_dir=str(self.config_mgr.logs_dir),
+            level=self.config.log_level,
+        )
+        self.logger.info("=" * 60)
+        self.logger.info("MyAgent 正在启动...")
+        self.logger.info(f"平台: {detect_platform()}")
+        self.logger.info(f"数据目录: {self.config_mgr.data_dir}")
+        self.logger.info("=" * 60)
 
-            return img
+        # 2. LLM 客户端
+        llm_cfg = self.config.llm
+        self.llm = LLMClient(
+            provider=llm_cfg.provider,
+            api_key=llm_cfg.api_key,
+            base_url=llm_cfg.base_url,
+            model=llm_cfg.model,
+            temperature=llm_cfg.temperature,
+            max_tokens=llm_cfg.max_tokens,
+            timeout=llm_cfg.timeout,
+            max_retries=llm_cfg.max_retries,
+            anthropic_api_key=llm_cfg.anthropic_api_key,
+        )
+        self.logger.info(f"LLM: {llm_cfg.provider}/{llm_cfg.model}")
 
-        except ImportError:
-            self.logger.warning("PIL 未安装，使用默认图标")
-            return None
-        except Exception as e:
-            self.logger.warning(f"创建图标失败: {e}")
-            return None
+        # 3. 记忆系统
+        mem_cfg = self.config.memory
+        self.memory = MemoryManager(db_path=mem_cfg.db_path)
+        self.memory.initialize()
+        mem_stats = self.memory.get_stats()
+        self.logger.info(f"记忆系统: {mem_stats['total_count']} 条记录")
 
-    def _get_status_text(self) -> str:
-        """获取状态文本"""
-        stats = self.agent.get_stats()
-        active_platforms = self.chatbot_manager.get_active_platforms()
+        # 4. 执行引擎
+        exe_cfg = self.config.executor
+        self.executor = ExecutionEngine(
+            timeout=exe_cfg.timeout,
+            max_retries=exe_cfg.max_retries,
+            auto_fix=exe_cfg.auto_fix,
+            max_output_length=exe_cfg.max_output_length,
+        )
+        self.logger.info(f"执行引擎: timeout={exe_cfg.timeout}s, auto_fix={exe_cfg.auto_fix}")
 
-        lines = [
-            f"状态: {self._status}",
-            f"活跃会话: {stats.get('active_sessions', 0)}",
-            f"工具调用: {stats.get('tool_calls', 0)}",
-        ]
+        # 5. 技能系统
+        self.skill_registry = SkillRegistry()
+        # 注册内置技能
+        self._register_builtin_skills()
+        skills = self.skill_registry.list_skills()
+        self.logger.info(f"技能系统: {len(skills)} 个技能已注册 - {skills}")
 
-        if active_platforms:
-            lines.append(f"聊天平台: {', '.join(active_platforms)}")
+        # 6. 任务队列
+        self.task_queue = TaskQueue(max_workers=self.config.agent.max_parallel)
+        await self.task_queue.start()
+        self.logger.info(f"任务队列: workers={self.config.agent.max_parallel}")
+
+        # 7. 创建 Agent
+        self.memory_agent = MemoryAgent(
+            llm=self.llm,
+            memory_manager=self.memory,
+            config=self.config,
+        )
+        self.tool_agent = ToolAgent(
+            llm=self.llm,
+            memory_manager=self.memory,
+            executor=self.executor,
+            skill_registry=self.skill_registry,
+            task_queue=self.task_queue,
+            config=self.config,
+        )
+        self.main_agent = MainAgent(
+            llm=self.llm,
+            memory_manager=self.memory,
+            executor=self.executor,
+            skill_registry=self.skill_registry,
+            task_queue=self.task_queue,
+            config=self.config,
+            tool_agent=self.tool_agent,
+            memory_agent=self.memory_agent,
+        )
+        self.logger.info("Agent 集群已初始化 (主/工具/记忆)")
+
+        # 8. 聊天平台
+        enabled_platforms = self.config_mgr.get_enabled_platforms()
+        if enabled_platforms:
+            self.chat_manager = ChatBotManager()
+            self.chat_manager.setup_platforms(
+                enabled_platforms,
+                message_handler=self._handle_chat_message,
+            )
+            self.logger.info(f"聊天平台: {[p.platform for p in enabled_platforms]}")
         else:
-            lines.append("聊天平台: 未启用")
+            self.logger.info("聊天平台: 未配置(仅CLI模式)")
 
-        return "\n".join(lines)
+        self._running = True
+        self.logger.info("✅ MyAgent 启动完成!")
 
-    def _open_logs(self):
-        """打开日志目录"""
-        log_file = get_config().get("app.log_file", "logs/myagent.log")
-        log_path = Path(log_file).parent.resolve()
-        if log_path.exists():
-            if platform.system() == "Windows":
-                os.startfile(str(log_path))
-            elif platform.system() == "Darwin":
-                os.system(f'open "{log_path}"')
-            else:
-                os.system(f'xdg-open "{log_path}"')
+    def _register_builtin_skills(self):
+        """注册内置技能"""
+        from skills.file_skill import (
+            FileReadSkill, FileWriteSkill, FileListSkill,
+            FileDeleteSkill, FileSearchSkill, FileMoveSkill,
+        )
+        from skills.search_skill import WebSearchSkill, WebReadSkill, URLReadSkill
+        from skills.system_skill import (
+            SystemInfoSkill, ProcessListSkill, CommandRunSkill,
+            EnvironmentGetSkill, PathExpandSkill,
+        )
+        from skills.browser_skill import (
+            BrowserOpenSkill, BrowserClickSkill, BrowserFillSkill,
+        )
 
-    def _open_data_dir(self):
-        """打开数据目录"""
-        data_dir = Path(get_config().get("app.data_dir", "data")).resolve()
-        if data_dir.exists():
-            if platform.system() == "Windows":
-                os.startfile(str(data_dir))
-            elif platform.system() == "Darwin":
-                os.system(f'open "{data_dir}"')
-            else:
-                os.system(f'xdg-open "{data_dir}"')
+        # 文件技能
+        for skill_cls in [
+            FileReadSkill, FileWriteSkill, FileListSkill,
+            FileDeleteSkill, FileSearchSkill, FileMoveSkill,
+        ]:
+            self.skill_registry.register(skill_cls())
 
-    def _show_stats(self):
-        """显示统计信息"""
-        stats = self.agent.get_stats()
-        memory_stats = self.agent.get_memory_stats()
-        chatbot_stats = self.chatbot_manager.get_stats()
+        # 搜索技能
+        for skill_cls in [WebSearchSkill, WebReadSkill, URLReadSkill]:
+            self.skill_registry.register(skill_cls())
 
-        info = f"""
-╔══════════════════════════════════╗
-║     MyAgent 运行状态             ║
-╠══════════════════════════════════╣
-║ Agent 统计:
-║   活跃会话: {stats.get('active_sessions', 0)}
-║   工具调用: {stats.get('tool_calls', 0)}
-║   执行统计: {json.dumps(stats.get('executor_stats', {}), ensure_ascii=False)}
-╠══════════════════════════════════╣
-║ 记忆统计: {json.dumps(memory_stats.get('stats', {}), ensure_ascii=False)}
-╠══════════════════════════════════╣
-║ 聊天平台: {json.dumps(chatbot_stats, ensure_ascii=False)}
-╚══════════════════════════════════╝
-"""
-        self.logger.info(info)
+        # 系统技能
+        for skill_cls in [
+            SystemInfoSkill, ProcessListSkill, CommandRunSkill,
+            EnvironmentGetSkill, PathExpandSkill,
+        ]:
+            self.skill_registry.register(skill_cls())
 
-    def _restart(self):
-        """重启"""
-        self.logger.info("重启 MyAgent...")
-        python = sys.executable
-        os.execl(python, python, *sys.argv)
+        # 浏览器技能
+        for skill_cls in [BrowserOpenSkill, BrowserClickSkill, BrowserFillSkill]:
+            self.skill_registry.register(skill_cls())
 
-    def _quit(self, icon=None, item=None):
-        """退出"""
-        self.logger.info("MyAgent 正在关闭...")
-        self._is_running = False
-        self.chatbot_manager.stop_all()
-        self.agent.shutdown()
-        if self._tray:
-            self._tray.stop()
-        os._exit(0)
+    async def process_message(
+        self,
+        user_message: str,
+        session_id: str = "",
+    ) -> str:
+        """
+        处理用户消息并返回回复。
 
-    def run(self):
-        """启动系统托盘"""
+        Args:
+            user_message: 用户消息
+            session_id: 会话 ID
+
+        Returns:
+            助手回复文本
+        """
+        if not self.main_agent:
+            return "⚠️ MyAgent 尚未初始化"
+
+        session_id = session_id or self._session_id
+
+        from agents.base import AgentContext
+        context = AgentContext(
+            session_id=session_id,
+            user_message=user_message,
+        )
+
         try:
-            import pystray
-            from pystray import MenuItem, Menu
-        except ImportError:
-            self.logger.error("pystray 未安装，请运行: pip install pystray")
+            result_context = await self.main_agent.process(context)
+            response = result_context.working_memory.get(
+                "final_response", "⚠️ 未能生成回复"
+            )
+            return response
+        except Exception as e:
+            self.logger.error(f"处理消息异常: {e}", exc_info=True)
+            return f"❌ 处理失败: {str(e)}"
+
+    async def _handle_chat_message(self, message: ChatMessage, bot):
+        """
+        处理来自聊天平台的消息。
+
+        Args:
+            message: 聊天消息
+            bot: 发送消息的机器人实例
+        """
+        # 生成会话 ID
+        session_id = bot._generate_session_id(message)
+
+        # 处理特殊命令
+        if message.text == "__cmd_clear__":
+            if self.memory:
+                self.memory.clear_conversation(session_id)
+            await bot.send_message(ChatResponse(
+                chat_id=message.chat_id,
+                text="🗑️ 对话历史已清除。",
+            ))
             return
 
-        icon_image = self.create_icon()
+        # 处理消息
+        response_text = await self.process_message(message.text, session_id)
 
-        menu = Menu(
-            MenuItem(
-                "MyAgent - " + self._status,
-                None,
-                enabled=False,
-            ),
-            Menu.SEPARATOR,
-            MenuItem(
-                "状态信息",
-                lambda icon, item: self._show_stats(),
-            ),
-            MenuItem(
-                "打开日志",
-                lambda icon, item: self._open_logs(),
-            ),
-            MenuItem(
-                "打开数据目录",
-                lambda icon, item: self._open_data_dir(),
-            ),
-            Menu.SEPARATOR,
-            MenuItem(
-                "重启",
-                lambda icon, item: self._restart(),
-            ),
-            MenuItem(
-                "退出",
-                lambda icon, item: self._quit(icon, item),
-            ),
-        )
+        # 发送回复
+        await bot.send_message(ChatResponse(
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            text=response_text,
+        ))
 
-        self._tray = pystray.Icon(
-            name="MyAgent",
-            icon=icon_image,
-            title="MyAgent AI 助手",
-            menu=menu,
-        )
+    async def run_cli(self):
+        """运行交互式命令行"""
+        if not self.main_agent:
+            await self.initialize()
 
-        self.logger.info("系统托盘已启动，右键点击图标可操作")
-        self._tray.run()
-
-
-# ============================================================
-# CLI 交互模式
-# ============================================================
-
-class CLIInterface:
-    """命令行交互界面"""
-
-    def __init__(self, agent: AgentController, logger_instance):
-        self.agent = agent
-        self.logger = logger_instance
-        self._current_session = None
-        self._running = True
-
-    def run(self):
-        """运行 CLI 交互"""
         print()
-        print("=" * 50)
-        print("  MyAgent - 本地执行型 AI 助手")
-        print("  输入消息开始对话，输入 /help 查看帮助")
-        print("=" * 50)
+        print("=" * 60)
+        print("  🤖 MyAgent - 本地桌面端执行型AI助手")
+        print(f"  LLM: {self.config.llm.provider}/{self.config.llm.model}")
+        print(f"  技能: {len(self.skill_registry.list_skills())} 个已注册")
+        print(f"  平台: {'CLI' + (' + ' + ','.join(self.chat_manager.get_active_platforms()) if self.chat_manager else '')}")
+        print("  输入 'help' 查看命令 | 'quit' 退出")
+        print("=" * 60)
         print()
 
         while self._running:
             try:
-                user_input = input("你> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n再见！")
-                break
+                # 读取用户输入
+                user_input = input("👤 你: ").strip()
 
-            if not user_input:
-                continue
+                if not user_input:
+                    continue
 
-            # 处理命令
-            if user_input.startswith("/"):
-                self._handle_command(user_input)
-                continue
+                # 内置命令
+                if user_input.lower() in ("quit", "exit", "q"):
+                    print("👋 再见!")
+                    break
+                elif user_input.lower() == "help":
+                    self._print_help()
+                    continue
+                elif user_input.lower() == "status":
+                    self._print_status()
+                    continue
+                elif user_input.lower() == "skills":
+                    self._print_skills()
+                    continue
+                elif user_input.lower() == "memory":
+                    self._print_memory_stats()
+                    continue
+                elif user_input.lower() == "sessions":
+                    self._print_sessions()
+                    continue
+                elif user_input.lower().startswith("session "):
+                    new_session = user_input[8:].strip()
+                    if new_session:
+                        self._session_id = new_session
+                        print(f"📝 已切换到会话: {self._session_id}")
+                    continue
+                elif user_input.lower() == "clear":
+                    if self.memory:
+                        self.memory.clear_conversation(self._session_id)
+                    print("🗑️ 对话历史已清除")
+                    continue
 
-            # 发送给 Agent
-            try:
-                print("思考中...", end="", flush=True)
-                response = self.agent.chat(
-                    message=user_input,
-                    session_id=self._current_session,
-                    callback=lambda msg: print(f"\r[执行] {msg}", end="", flush=True),
-                )
-                print(f"\r助手> {response}")
+                # 处理消息
+                print("⏳ 思考中...", end="", flush=True)
+                response = await self.process_message(user_input, self._session_id)
+                print(f"\r🤖 助手: {response}")
                 print()
 
-                if not self._current_session:
-                    # 从 agent 获取 session
-                    pass
-
+            except KeyboardInterrupt:
+                print("\n\n👋 再见!")
+                break
+            except EOFError:
+                break
             except Exception as e:
-                print(f"\n错误: {e}")
-                self.logger.error(f"处理消息异常: {e}", exc_info=True)
+                print(f"\n❌ 错误: {e}")
+                print()
 
-    def _handle_command(self, cmd: str):
-        """处理斜杠命令"""
-        parts = cmd.split(maxsplit=1)
-        command = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
+    def _print_help(self):
+        print("""
+📋 可用命令:
+  help          - 显示帮助
+  status        - 查看系统状态
+  skills        - 列出所有技能
+  memory        - 查看记忆统计
+  sessions      - 查看会话列表
+  session <id>  - 切换会话
+  clear         - 清除当前对话历史
+  quit/exit     - 退出
 
-        if command == "/help":
-            print("""
-可用命令:
-  /help          显示帮助
-  /new           新建会话
-  /session       显示当前会话ID
-  /stats         显示统计信息
-  /memory        显示记忆统计
-  /clear         清除当前会话
-  /quit          退出
-  /exec <code>   直接执行代码
-  /tool <name>   调用技能
+💡 使用方式:
+  直接输入自然语言描述你的需求。
+  示例:
+    - "帮我创建一个Python文件"
+    - "搜索一下最新的AI新闻"
+    - "查看系统信息"
+    - "!system_info" (直接调用技能)
 """)
-        elif command == "/new":
-            self._current_session = None
-            print("已新建会话")
-        elif command == "/session":
-            print(f"当前会话: {self._current_session or '(新会话)'}")
-        elif command == "/stats":
-            stats = self.agent.get_stats()
-            print(f"统计: {json.dumps(stats, ensure_ascii=False, indent=2)}")
-        elif command == "/memory":
-            mem_stats = self.agent.get_memory_stats()
-            print(f"记忆统计: {json.dumps(mem_stats, ensure_ascii=False, indent=2)}")
-        elif command == "/clear":
-            self._current_session = None
-            print("会话已清除")
-        elif command == "/quit":
-            self._running = False
-        elif command == "/exec":
-            if args:
-                from executor import execute_code
-                result = execute_code(args)
-                print(result.to_json())
-        elif command == "/tool":
-            print("技能列表:")
-            from skills import get_skill_registry
-            registry = get_skill_registry()
-            for skill in registry.list_skills():
-                print(f"  - {skill.name}: {skill.description}")
-        else:
-            print(f"未知命令: {command}，输入 /help 查看帮助")
 
+    def _print_status(self):
+        print(f"""
+📊 系统状态:
+  运行状态: {'✅ 运行中' if self._running else '❌ 已停止'}
+  LLM: {self.config.llm.provider}/{self.config.llm.model}
+  当前会话: {self._session_id}
+  执行引擎: timeout={self.config.executor.timeout}s
+  任务队列: {self.task_queue.get_stats() if self.task_queue else 'N/A'}
+  记忆: {self.memory.get_stats() if self.memory else 'N/A'}
+  聊天平台: {self.chat_manager.get_stats() if self.chat_manager else 'N/A'}
+""")
 
-# ============================================================
-# 应用主类
-# ============================================================
+    def _print_skills(self):
+        print("\n🛠️ 已注册技能:")
+        if self.skill_registry:
+            for info in self.skill_registry.list_skills_info():
+                danger = " ⚠️" if info.get("dangerous") else ""
+                print(f"  • {info['name']}: {info['description']}{danger}")
+        print()
 
-class MyAgentApp:
-    """
-    MyAgent 应用主类
-    初始化所有组件，协调运行
-    """
+    def _print_memory_stats(self):
+        if self.memory:
+            stats = self.memory.get_stats()
+            print(f"\n🧠 记忆系统:")
+            print(f"  短期记忆: {stats.get('short_term_count', 0)} 条")
+            print(f"  工作记忆: {stats.get('working_count', 0)} 条")
+            print(f"  长期记忆: {stats.get('long_term_count', 0)} 条")
+            print(f"  总计: {stats.get('total_count', 0)} 条")
+            print(f"  会话数: {stats.get('session_count', 0)}")
+            print()
 
-    def __init__(self):
-        self.config: Optional[Config] = None
-        self.logger: Optional[logging.Logger] = None
-        self.agent: Optional[AgentController] = None
-        self.chatbot_manager: Optional[ChatBotManager] = None
-        self.task_queue: Optional[TaskQueue] = None
-        self._components_initialized = False
+    def _print_sessions(self):
+        # TODO: 从记忆系统中获取活跃会话列表
+        print(f"\n📂 当前会话: {self._session_id}")
+        print("  (提示: 使用 'session <名称>' 切换会话)")
+        print()
 
-    def initialize(self, config_path: Optional[str] = None) -> bool:
-        """初始化所有组件"""
-        try:
-            # 1. 配置
-            self.config = init_config(config_path)
-
-            # 2. 日志
-            self.logger = setup_logging(self.config)
-
-            # 3. LLM
-            try:
-                init_llm()
-                llm = get_llm()
-                self.logger.info(f"LLM 初始化完成: {llm.model}")
-            except Exception as e:
-                self.logger.error(f"LLM 初始化失败: {e}")
-
-            # 4. 技能系统
-            try:
-                from skills import get_skill_registry
-                registry = get_skill_registry()
-                self.logger.info(f"技能系统初始化完成: {len(registry.list_skills())} 个技能")
-            except Exception as e:
-                self.logger.error(f"技能系统初始化失败: {e}")
-
-            # 5. Agent
-            try:
-                self.agent = AgentController()
-                self.logger.info("Agent 初始化完成")
-            except Exception as e:
-                self.logger.error(f"Agent 初始化失败: {e}")
-
-            # 6. 聊天平台
-            try:
-                self.chatbot_manager = ChatBotManager(
-                    on_message_handler=self._chat_message_handler
-                )
-                self.chatbot_manager.setup()
-            except Exception as e:
-                self.logger.error(f"聊天平台初始化失败: {e}")
-
-            # 7. 任务队列
-            try:
-                self.task_queue = TaskQueue(max_workers=3)
-                self.task_queue.start()
-            except Exception as e:
-                self.logger.error(f"任务队列初始化失败: {e}")
-
-            self._components_initialized = True
-            self.logger.info("所有组件初始化完成")
-            return True
-
-        except Exception as e:
-            print(f"初始化失败: {e}")
-            if self.logger:
-                self.logger.critical(f"初始化失败: {e}", exc_info=True)
-            return False
-
-    def _chat_message_handler(self, message: str, session_id: str) -> str:
-        """聊天平台消息处理回调"""
-        if self.agent:
-            return self.agent.chat(message, session_id=session_id)
-        return "Agent 未初始化"
-
-    def run_cli(self):
-        """以 CLI 模式运行"""
-        if not self._components_initialized:
-            self.initialize()
-
-        self.logger.info("启动 CLI 模式")
-
-        # 启动聊天平台 (后台)
-        if self.chatbot_manager:
-            self.chatbot_manager.start_all()
-
-        # 运行 CLI
-        cli = CLIInterface(self.agent, self.logger)
-        try:
-            cli.run()
-        finally:
-            self.shutdown()
-
-    def run_tray(self):
-        """以系统托盘模式运行"""
-        if not self._components_initialized:
-            self.initialize()
-
-        self.logger.info("启动系统托盘模式")
-
-        # 启动聊天平台 (后台)
-        if self.chatbot_manager:
-            self.chatbot_manager.start_all()
-
-        # 启动托盘
-        tray = TrayApp(self.agent, self.chatbot_manager, self.logger)
-        try:
-            tray.run()
-        finally:
-            self.shutdown()
-
-    def run_server(self, host: str = "127.0.0.1", port: int = 8080):
-        """以 HTTP API 模式运行"""
-        if not self._components_initialized:
-            self.initialize()
-
-        self.logger.info(f"启动 HTTP API 模式: {host}:{port}")
-
-        # 启动聊天平台 (后台)
-        if self.chatbot_manager:
-            self.chatbot_manager.start_all()
-
-        # 启动 HTTP 服务
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        import urllib.parse
-
-        app = self
-
-        class APIHandler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                """处理 POST 请求"""
-                if self.path == "/api/chat":
-                    content_length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(content_length)
-                    try:
-                        data = json.loads(body)
-                        message = data.get("message", "")
-                        session_id = data.get("session_id", "")
-
-                        if not message:
-                            self._send_json({"error": "message 不能为空"}, 400)
-                            return
-
-                        response = app.agent.chat(message, session_id=session_id)
-                        self._send_json({"response": response})
-
-                    except json.JSONDecodeError:
-                        self._send_json({"error": "无效的 JSON"}, 400)
-                    except Exception as e:
-                        self._send_json({"error": str(e)}, 500)
-                else:
-                    self._send_json({"error": "Not Found"}, 404)
-
-            def do_GET(self):
-                """处理 GET 请求"""
-                if self.path == "/api/stats":
-                    stats = app.agent.get_stats()
-                    stats.update(app.agent.get_memory_stats())
-                    self._send_json(stats)
-                elif self.path == "/api/health":
-                    self._send_json({"status": "ok", "version": app.config.get("app.version", "1.0.0")})
-                else:
-                    self._send_json({"error": "Not Found"}, 404)
-
-            def _send_json(self, data: dict, status: int = 200):
-                self.send_response(status)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
-
-            def log_message(self, format, *args):
-                app.logger.debug(f"HTTP: {format % args}")
-
-        server = HTTPServer((host, port), APIHandler)
-        self.logger.info(f"HTTP API 已启动: http://{host}:{port}")
-
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.server_close()
-            self.shutdown()
-
-    def shutdown(self):
+    async def shutdown(self):
         """关闭所有组件"""
-        self.logger.info("正在关闭...")
-        if self.chatbot_manager:
-            self.chatbot_manager.stop_all()
-        if self.agent:
-            self.agent.shutdown()
+        self.logger.info("MyAgent 正在关闭...")
+        self._running = False
+
+        if self.chat_manager:
+            await self.chat_manager.stop_all()
+
         if self.task_queue:
-            self.task_queue.stop()
-        self.logger.info("已关闭")
+            await self.task_queue.stop()
+
+        if self.memory:
+            self.memory.close()
+
+        self.logger.info("MyAgent 已关闭")
 
 
-# ============================================================
-# 入口函数
-# ============================================================
+# ==============================================================================
+# 系统托盘
+# ==============================================================================
+
+def create_tray_icon(app: MyAgentApp, web_port: int = 8765):
+    """
+    创建系统托盘图标。
+
+    提供菜单:
+      - 打开管理后台
+      - 显示状态
+      - 打开日志
+      - 打开工作目录
+      - 设置开机自启
+      - 后台运行
+      - 退出
+    """
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+
+    # 生成默认图标 (简单的机器人图标)
+    def create_icon_image():
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # 画一个简单的圆形头像
+        draw.ellipse([8, 4, 56, 52], fill="#4A90D9")
+        # 画眼睛
+        draw.ellipse([20, 20, 30, 30], fill="white")
+        draw.ellipse([34, 20, 44, 30], fill="white")
+        draw.ellipse([23, 23, 27, 27], fill="#333")
+        draw.ellipse([37, 23, 41, 27], fill="#333")
+        # 画嘴巴
+        draw.arc([22, 28, 42, 42], 0, 180, fill="white", width=2)
+        return img
+
+    def open_web_ui(icon, item):
+        """打开管理后台 Web UI"""
+        import webbrowser
+        url = f"http://127.0.0.1:{web_port}/ui/"
+        webbrowser.open(url)
+
+    def open_logs(icon, item):
+        import subprocess
+        import platform
+        log_dir = str(app.config_mgr.logs_dir)
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(log_dir)  # type: ignore
+        elif system == "Darwin":
+            subprocess.Popen(["open", log_dir])
+        else:
+            subprocess.Popen(["xdg-open", log_dir])
+
+    def open_workdir(icon, item):
+        import subprocess
+        import platform
+        wd = str(app.config_mgr.data_dir / "workspace")
+        Path(wd).mkdir(parents=True, exist_ok=True)
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(wd)  # type: ignore
+        elif system == "Darwin":
+            subprocess.Popen(["open", wd])
+        else:
+            subprocess.Popen(["xdg-open", wd])
+
+    def show_status(icon, item):
+        if app.main_agent:
+            stats = app.main_agent.get_stats()
+            print(f"\n📊 Agent 状态: {stats}")
+        if app.memory:
+            print(f"🧠 记忆: {app.memory.get_stats()}")
+        if app.task_queue:
+            print(f"📋 队列: {app.task_queue.get_stats()}")
+
+    def toggle_autostart(icon, item):
+        setup_auto_start(not item.checked)
+
+    def on_quit(icon, item):
+        icon.stop()
+        if app._running:
+            asyncio.run(app.shutdown())
+
+    icon_image = create_icon_image()
+    menu = pystray.Menu(
+        pystray.MenuItem("🤖 MyAgent - 运行中", None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("🖥️  打开管理后台", open_web_ui,
+                          default=True),  # 双击托盘图标打开
+        pystray.MenuItem("📋 显示状态", show_status),
+        pystray.MenuItem("📁 打开工作目录", open_workdir),
+        pystray.MenuItem("📄 打开日志目录", open_logs),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("🔄 开机自启", toggle_autostart, checked=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("⏸️  最小化到后台", None, enabled=False),
+        pystray.MenuItem("❌ 退出", on_quit),
+    )
+
+    return pystray.Icon("myagent", icon_image, "MyAgent AI 助手", menu)
+
+
+def run_with_tray(app: MyAgentApp, web_port: int = 8765):
+    """在系统托盘中运行 MyAgent"""
+    tray = create_tray_icon(app, web_port)
+    if tray is None:
+        app.logger.warning("pystray 未安装，跳过系统托盘")
+        return
+
+    # 在后台线程运行托盘
+    tray_thread = threading.Thread(target=tray.run, daemon=True)
+    tray_thread.start()
+    app.logger.info(f"系统托盘已启动 (管理后台: http://127.0.0.1:{web_port}/ui/)")
+
+
+# ==============================================================================
+# 开机自启设置
+# ==============================================================================
+
+def setup_auto_start(enable: bool = True):
+    """
+    设置开机自启。
+
+    Windows: 添加到启动文件夹
+    macOS: 使用 launchd (plist)
+    Linux: 使用 systemd user service
+    """
+    import platform
+    system = platform.system()
+
+    try:
+        if system == "Windows":
+            _setup_autostart_windows(enable)
+        elif system == "Darwin":
+            _setup_autostart_macos(enable)
+        elif system == "Linux":
+            _setup_autostart_linux(enable)
+    except Exception as e:
+        print(f"⚠️ 设置开机自启失败: {e}")
+
+
+def _setup_autostart_windows(enable: bool):
+    """Windows: 启动文件夹快捷方式"""
+    import winreg
+    import os
+
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                         winreg.KEY_SET_VALUE)
+
+    if enable:
+        exe_path = os.path.abspath(sys.argv[0])
+        winreg.SetValueEx(key, "MyAgent", 0, winreg.REG_SZ, exe_path)
+        print("✅ 已设置 Windows 开机自启")
+    else:
+        try:
+            winreg.DeleteValue(key, "MyAgent")
+            print("✅ 已取消 Windows 开机自启")
+        except FileNotFoundError:
+            print("ℹ️ 未找到开机自启项")
+
+    winreg.CloseKey(key)
+
+
+def _setup_autostart_macos(enable: bool):
+    """macOS: LaunchAgent plist"""
+    import plistlib
+
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = plist_dir / "com.myagent.plist"
+
+    if enable:
+        plist_data = {
+            "Label": "com.myagent",
+            "ProgramArguments": [sys.executable, str(PROJECT_ROOT / "main.py"), "--tray"],
+            "RunAtLoad": True,
+            "KeepAlive": False,
+        }
+        with open(plist_path, "wb") as f:
+            plistlib.dump(plist_data, f)
+        print(f"✅ 已设置 macOS 开机自启: {plist_path}")
+    else:
+        if plist_path.exists():
+            plist_path.unlink()
+            print("✅ 已取消 macOS 开机自启")
+
+
+def _setup_autostart_linux(enable: bool):
+    """Linux: systemd user service"""
+    service_dir = Path.home() / ".config" / "systemd" / "user"
+    service_dir.mkdir(parents=True, exist_ok=True)
+    service_path = service_dir / "myagent.service"
+
+    if enable:
+        service_content = f"""[Unit]
+Description=MyAgent AI Assistant
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={sys.executable} {PROJECT_ROOT / 'main.py'} --tray
+WorkingDirectory={PROJECT_ROOT}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+"""
+        with open(service_path, "w") as f:
+            f.write(service_content)
+        print(f"✅ 已创建 systemd service: {service_path}")
+        print("   启用命令: systemctl --user enable myagent.service")
+    else:
+        if service_path.exists():
+            service_path.unlink()
+            print("✅ 已取消 Linux 开机自启")
+
+
+# ==============================================================================
+# 主函数
+# ==============================================================================
 
 def main():
     """主入口"""
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="MyAgent - 本地桌面端执行型 AI 助手",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-使用示例:
-  python main.py                   # CLI 交互模式
-  python main.py --tray            # 系统托盘模式
-  python main.py --server          # HTTP API 模式 (端口 8080)
-  python main.py --server --port 3000  # HTTP API 模式 (端口 3000)
-  python main.py --config my.yaml  # 使用指定配置文件
-        """
-    )
-
-    parser.add_argument(
-        "--tray", "-t",
-        action="store_true",
-        help="以系统托盘模式运行",
-    )
-    parser.add_argument(
-        "--server", "-s",
-        action="store_true",
-        help="以 HTTP API 服务模式运行",
-    )
-    parser.add_argument(
-        "--port", "-p",
-        type=int,
-        default=8080,
-        help="HTTP API 端口 (默认 8080)",
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="127.0.0.1",
-        help="HTTP API 监听地址 (默认 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--config", "-c",
-        type=str,
-        default=None,
-        help="配置文件路径",
-    )
-    parser.add_argument(
-        "--version", "-v",
-        action="version",
-        version="MyAgent v1.0.0",
-    )
-
+    parser = argparse.ArgumentParser(description="MyAgent - 本地桌面端执行型AI助手")
+    parser.add_argument("--tray", action="store_true", help="以系统托盘模式运行")
+    parser.add_argument("--web", type=int, nargs="?", const=8765, default=None,
+                        help="启动管理后台 Web UI (可选端口，默认8765)")
+    parser.add_argument("--port", type=int, default=8765, help="Web UI 端口")
+    parser.add_argument("--autostart", action="store_true", help="设置开机自启")
+    parser.add_argument("--no-autostart", action="store_true", help="取消开机自启")
+    parser.add_argument("--config", type=str, help="指定配置文件路径")
+    parser.add_argument("--debug", action="store_true", help="调试模式")
     args = parser.parse_args()
 
-    # 初始化应用
+    # 配置
+    config_mgr = get_config()
+    if args.debug:
+        config_mgr.config.log_level = "DEBUG"
+    if args.config:
+        config_mgr._config_file = Path(args.config)
+        config_mgr.load()
+
+    # 开机自启
+    if args.autostart:
+        setup_auto_start(True)
+        return
+    if args.no_autostart:
+        setup_auto_start(False)
+        return
+
+    # 创建应用
     app = MyAgentApp()
+    web_port = args.web if args.web else args.port if args.tray else None
 
     # 信号处理
     def signal_handler(sig, frame):
-        print("\n收到退出信号...")
-        app.shutdown()
+        print("\n🛑 正在关闭...")
+        if app._running:
+            asyncio.run(app.shutdown())
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
-    if hasattr(signal, 'SIGTERM'):
-        signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
-    # 运行
-    if args.tray:
-        app.run_tray()
-    elif args.server:
-        app.run_server(host=args.host, port=args.port)
-    else:
-        app.run_cli()
+    # 启动
+    async def run():
+        await app.initialize()
+
+        # Web 管理后台
+        api_server = None
+        if web_port:
+            from web.api_server import ApiServer
+            api_server = ApiServer(app)
+            await api_server.start(port=web_port)
+            app.logger.info(f"管理后台: http://127.0.0.1:{web_port}/ui/")
+
+        # 系统托盘 (默认开启管理后台)
+        if args.tray or web_port:
+            run_with_tray(app, web_port)
+
+        # 启动聊天平台(后台)
+        if app.chat_manager:
+            asyncio.create_task(app.chat_manager.start_all())
+
+        if args.tray:
+            # 托盘模式: 后台等待
+            app.logger.info("后台运行中... (Ctrl+C 退出)")
+            while app._running:
+                await asyncio.sleep(1)
+        else:
+            # CLI 模式
+            await app.run_cli()
+
+        await app.shutdown()
+        if api_server:
+            await api_server.stop()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if app._running:
+            asyncio.run(app.shutdown())
 
 
 if __name__ == "__main__":
