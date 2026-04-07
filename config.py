@@ -54,6 +54,10 @@ class ExecutorConfig:
     max_retries: int = 2               # 自动重试次数
     auto_fix: bool = True              # 自动修复错误
     max_output_length: int = 50000     # 输出最大长度
+    execution_mode: str = "local"      # 执行模式: local(本机) | sandbox(沙盒)
+    sandbox_image: str = "python:3.12-slim"  # 沙盒 Docker 镜像
+    sandbox_network: bool = False      # 沙盒是否允许网络
+    sandbox_memory: str = "512m"       # 沙盒内存限制
     allowed_dirs: List[str] = field(default_factory=list)  # 允许访问的目录(空=全部)
     blocked_commands: List[str] = field(default_factory=lambda: [
         "rm -rf /", "format", "del /f /s /q C:\\", "mkfs", "dd if=/dev/zero"

@@ -33,6 +33,8 @@ class ApiServer:
         r.add_put("/api/agents/{name}/soul", self.handle_set_soul)
         r.add_get("/api/agents/{name}/identity", self.handle_get_identity)
         r.add_put("/api/agents/{name}/identity", self.handle_set_identity)
+        r.add_get("/api/agents/{name}/user", self.handle_get_user)
+        r.add_put("/api/agents/{name}/user", self.handle_set_user)
         r.add_get("/api/platforms", self.handle_list_platforms)
         r.add_put("/api/platforms/{name}", self.handle_update_platform)
         r.add_get("/api/sessions", self.handle_list_sessions)
@@ -49,6 +51,8 @@ class ApiServer:
         r.add_get("/api/llm/usage", self.handle_llm_usage)
         r.add_get("/api/skills", self.handle_list_skills)
         r.add_get("/api/skills/{name}", self.handle_get_skill)
+        r.add_get("/api/executor", self.handle_get_executor)
+        r.add_put("/api/executor", self.handle_update_executor)
         r.add_get("/api/workdir", self.handle_get_workdir)
         r.add_put("/api/workdir", self.handle_set_workdir)
         r.add_get("/api/workdir/files", self.handle_list_workdir)
@@ -116,7 +120,8 @@ class ApiServer:
         cfg = json.loads((ad / "config.json").read_text())
         soul = (ad / "soul.md").read_text() if (ad / "soul.md").exists() else ""
         identity = (ad / "identity.md").read_text() if (ad / "identity.md").exists() else ""
-        return web.json_response({"name": name, **cfg, "soul": soul, "identity": identity})
+        user = (ad / "user.md").read_text() if (ad / "user.md").exists() else ""
+        return web.json_response({"name": name, **cfg, "soul": soul, "identity": identity, "user": user})
 
     async def handle_update_agent(self, request):
         name = request.match_info["name"]; data = await request.json()
@@ -150,6 +155,51 @@ class ApiServer:
         data = await request.json(); ad = self._agent_dir(request.match_info["name"])
         ad.mkdir(parents=True, exist_ok=True)
         (ad / "identity.md").write_text(data.get("identity", ""))
+        return web.json_response({"ok": True})
+
+    async def handle_get_user(self, request):
+        p = self._agent_dir(request.match_info["name"]) / "user.md"
+        return web.json_response({"user": p.read_text() if p.exists() else ""})
+
+    async def handle_set_user(self, request):
+        data = await request.json(); ad = self._agent_dir(request.match_info["name"])
+        ad.mkdir(parents=True, exist_ok=True)
+        (ad / "user.md").write_text(data.get("user", ""))
+        return web.json_response({"ok": True})
+
+    # --- Executor ---
+    async def handle_get_executor(self, request):
+        info = self.core.executor.get_execution_info() if self.core.executor else {}
+        cfg = self.core.config.executor if self.core.config else None
+        return web.json_response({
+            **info,
+            "timeout": cfg.timeout if cfg else 300,
+            "auto_fix": cfg.auto_fix if cfg else True,
+            "max_output_length": cfg.max_output_length if cfg else 50000,
+        })
+
+    async def handle_update_executor(self, request):
+        data = await request.json()
+        cfg_path = self.core.config_mgr._config_file
+        cfg_data = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+        exe = cfg_data.setdefault("executor", {})
+        for k in ("execution_mode", "timeout", "auto_fix", "max_output_length",
+                   "sandbox_image", "sandbox_network", "sandbox_memory"):
+            if k in data:
+                exe[k] = data[k]
+        cfg_path.write_text(json.dumps(cfg_data, indent=2, ensure_ascii=False))
+        # 实时切换
+        if self.core.executor and "execution_mode" in data:
+            mode = data["execution_mode"]
+            ok = self.core.executor.set_execution_mode(mode)
+            if "sandbox_image" in data:
+                self.core.executor.sandbox_image = data["sandbox_image"]
+            if "sandbox_network" in data:
+                self.core.executor.sandbox_network = data["sandbox_network"]
+            if "sandbox_memory" in data:
+                self.core.executor.sandbox_memory = data["sandbox_memory"]
+            if not ok:
+                return web.json_response({"ok": False, "error": f"切换到 {mode} 失败(Docker 不可用)"})
         return web.json_response({"ok": True})
 
     # --- Platforms ---

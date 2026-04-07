@@ -175,6 +175,10 @@ class ExecutionEngine:
         max_retries: int = 2,
         auto_fix: bool = True,
         max_output_length: int = 50000,
+        execution_mode: str = "local",
+        sandbox_image: str = "python:3.12-slim",
+        sandbox_network: bool = False,
+        sandbox_memory: str = "512m",
         work_dir: Optional[str] = None,
         extra_blocked: Optional[List[str]] = None,
     ):
@@ -182,6 +186,10 @@ class ExecutionEngine:
         self.max_retries = max_retries
         self.auto_fix = auto_fix
         self.max_output_length = max_output_length
+        self.execution_mode = execution_mode  # local | sandbox
+        self.sandbox_image = sandbox_image
+        self.sandbox_network = sandbox_network
+        self.sandbox_memory = sandbox_memory
         self.work_dir = work_dir or os.getcwd()
 
         # 安全: 合并正则模式 + 字符串黑名单
@@ -190,6 +198,14 @@ class ExecutionEngine:
             self._blocked.update(extra_blocked)
 
         self._execution_count = 0
+
+        # 沙盒模式: 检查 Docker 可用性
+        self._docker_available = False
+        if self.execution_mode == "sandbox":
+            self._docker_available = self._check_docker()
+            if not self._docker_available:
+                logger.warning("沙盒模式: Docker 不可用，将回退到本机执行")
+                self.execution_mode = "local"
 
         # ── 启动时缓存: 检测平台 & Shell ────────────────────────────────────
         self._platform = detect_platform()
@@ -202,6 +218,17 @@ class ExecutionEngine:
     # ======================================================================
     # 启动时一次性检测
     # ======================================================================
+
+    def _check_docker(self) -> bool:
+        """检查 Docker 是否可用。"""
+        try:
+            proc = subprocess.run(
+                ["docker", "info"],
+                capture_output=True, timeout=10,
+            )
+            return proc.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
 
     def _detect_shells(self) -> None:
         """在 __init__ 中调用一次，探测可用 Shell 并缓存路径。"""
@@ -438,17 +465,20 @@ class ExecutionEngine:
                 error=reason,
                 language=language,
                 code=code,
-                metadata=metadata,
+                metadata={**metadata, "mode": self.execution_mode},
             )
 
         self._execution_count += 1
         exec_id = f"exec_{self._execution_count}"
 
-        logger.info(f"[{exec_id}] 开始执行 ({language}, timeout={exec_timeout}s)")
+        mode_label = "本地" if self.execution_mode == "local" else "沙盒(Docker)"
+        logger.info(f"[{exec_id}] 开始执行 ({language}, mode={mode_label}, timeout={exec_timeout}s)")
         logger.debug(f"[{exec_id}] 代码:\n{code[:500]}")
 
-        # 对于 Python，使用临时文件执行(更好的错误追踪)
-        if language == "python":
+        # 根据执行模式选择执行方式
+        if self.execution_mode == "sandbox" and self._docker_available:
+            result = await self._execute_sandbox(language, code, exec_timeout, work_dir, env, exec_id)
+        elif language == "python":
             result = await self._execute_python(code, exec_timeout, work_dir, env, exec_id)
         else:
             result = await self._execute_shell(language, code, exec_timeout, work_dir, env, exec_id)
@@ -616,6 +646,123 @@ class ExecutionEngine:
                 error=str(e),
                 execution_time=elapsed,
             )
+
+    # ======================================================================
+    # 沙盒执行 (Docker 容器)
+    # ======================================================================
+
+    async def _execute_sandbox(
+        self,
+        language: str,
+        code: str,
+        timeout: int,
+        work_dir: str,
+        env: Optional[Dict[str, str]],
+        exec_id: str,
+    ) -> ExecResult:
+        """在 Docker 容器中执行代码（沙盒模式）。"""
+        start_time = asyncio.get_event_loop().time()
+
+        # 确定容器内的执行命令
+        if language == "python":
+            container_cmd = ["python3", "-c", code]
+        elif language in ("shell", "bash", "system"):
+            container_cmd = ["bash", "-c", code]
+        elif language == "powershell":
+            return ExecResult(error="PowerShell 不支持沙盒模式")
+        else:
+            container_cmd = ["sh", "-c", code]
+
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "--memory", self.sandbox_memory,
+            "--cpus", "1",
+            "--pids-limit", "64",
+            "--workdir", "/workspace",
+        ]
+
+        if not self.sandbox_network:
+            docker_cmd.append("--network=none")
+
+        # 挂载工作目录为只读
+        if os.path.isdir(work_dir):
+            docker_cmd.extend(["-v", f"{work_dir}:/workspace:ro"])
+
+        docker_cmd.extend([self.sandbox_image] + container_cmd)
+
+        logger.info(f"[{exec_id}] 沙盒执行: docker run {self.sandbox_image}")
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *docker_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=work_dir,
+                env=self._get_env(env),
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=timeout
+                )
+                elapsed = asyncio.get_event_loop().time() - start_time
+                return ExecResult(
+                    success=process.returncode == 0,
+                    stdout=stdout.decode("utf-8", errors="replace"),
+                    stderr=stderr.decode("utf-8", errors="replace"),
+                    exit_code=process.returncode or -1,
+                    error=stderr.decode("utf-8", errors="replace") if process.returncode != 0 else "",
+                    execution_time=elapsed,
+                    metadata={"mode": "sandbox", "image": self.sandbox_image},
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                elapsed = asyncio.get_event_loop().time() - start_time
+                return ExecResult(
+                    success=False,
+                    error=f"沙盒执行超时 ({timeout}s)",
+                    execution_time=elapsed,
+                    metadata={"mode": "sandbox"},
+                )
+        except FileNotFoundError:
+            # Docker 不存在，回退到本地执行
+            logger.warning(f"[{exec_id}] Docker 不可用，回退到本地执行")
+            self.execution_mode = "local"
+            if language == "python":
+                return await self._execute_python(code, timeout, work_dir, env, exec_id)
+            else:
+                return await self._execute_shell(language, code, timeout, work_dir, env, exec_id)
+        except Exception as e:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            return ExecResult(
+                success=False,
+                error=f"沙盒执行异常: {e}",
+                execution_time=elapsed,
+                metadata={"mode": "sandbox"},
+            )
+
+    def set_execution_mode(self, mode: str) -> bool:
+        """切换执行模式。返回是否切换成功。"""
+        if mode not in ("local", "sandbox"):
+            return False
+        if mode == "sandbox":
+            if not self._check_docker():
+                logger.warning("沙盒模式: Docker 不可用")
+                return False
+            self._docker_available = True
+        self.execution_mode = mode
+        logger.info(f"执行模式已切换: {mode}")
+        return True
+
+    def get_execution_info(self) -> Dict[str, Any]:
+        """获取当前执行模式信息。"""
+        return {
+            "mode": self.execution_mode,
+            "docker_available": self._docker_available,
+            "sandbox_image": self.sandbox_image,
+            "sandbox_network": self.sandbox_network,
+            "sandbox_memory": self.sandbox_memory,
+            "execution_count": self._execution_count,
+        }
 
     # ======================================================================
     # 自动修复(增强: 12 种 Python + 4 种 Shell)
