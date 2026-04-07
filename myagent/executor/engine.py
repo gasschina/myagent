@@ -4,15 +4,18 @@ executor/engine.py - 执行引擎
 Open Interpreter 风格的本地代码执行引擎。
 支持 Python / Shell (Bash) / PowerShell / 系统命令。
 特性:
-  - 安全沙箱执行(超时控制、命令黑名单)
-  - 自动错误捕获与修复
+  - 安全沙箱执行(超时控制、命令黑名单/正则)
+  - 自动错误捕获与修复(12 种 Python 模式 + 4 种 Shell 模式)
   - 结构化结果返回
   - 跨平台兼容 (Windows/macOS/Linux)
+  - 启动时缓存 PATH 与 Shell 检测
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -100,13 +103,71 @@ class ExecutionEngine:
         print(result.to_dict())
     """
 
-    # 危险命令黑名单
+    # ── 危险命令模式(正则 + 词边界) ──────────────────────────────────────────
+    DANGEROUS_PATTERNS: List[Tuple[str, str]] = [
+        # Unix destructive
+        (r'\brm\s+(-[^\s]*r[^\s]*f[^\s]*|-[^\s]*f[^\s]*r[^\s]*)\s+/', 'rm -rf /'),
+        (r'\brm\s+(-[^\s]*r[^\s]*f[^\s]*|-[^\s]*f[^\s]*r[^\s]*)\s+/\*', 'rm -rf /*'),
+        (r'\bmkfs\b', 'mkfs (格式化磁盘)'),
+        (r'\bdd\s+if=\s*/dev/', 'dd (直接磁盘写入)'),
+        (r':\s*\(\)\s*\{.*\}\s*;', 'fork bomb'),
+        (r'\bfork\s+bomb\b', 'fork bomb'),
+        # Windows destructive
+        (r'\bformat\s+[A-Za-z]:', 'format (格式化磁盘)'),
+        (r'\bdel\s+/[fFsS]\s+/[sS]\s+/[qQ]\s+[A-Za-z]:', 'del /f /s /q (删除系统文件)'),
+        # System
+        (r'\bshutdown\s+-[hHrR]\s+now\b', 'shutdown -h now'),
+        (r'\breboot\b', 'reboot'),
+        (r'\binit\s+0\b', 'init 0'),
+        (r'\bchmod\s+-R\s+777\s+/\s', 'chmod -R 777 / (开放根目录权限)'),
+        (r'\bchown\s+-R\b', 'chown -R (递归更改所有权)'),
+    ]
+
+    # ── 旧式字符串匹配列表(兼容 & 自定义扩展) ──────────────────────────────
     DANGEROUS_COMMANDS = [
         "rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero",
         ":(){ :|:& };:", "fork bomb",
         "format C:", "del /f /s /q C:\\",
         "shutdown -h now", "reboot",
     ]
+
+    # ── Python 常见拼写错误表 ───────────────────────────────────────────────
+    COMMON_MISSPELLINGS: Dict[str, str] = {
+        "pritn": "print", "prnit": "print", "pint": "print",
+        "improt": "import", "imort": "import",
+        "retun": "return", "retrun": "return", "reutrn": "return",
+        "defualt": "default", "defautl": "default",
+        "ture": "True", "flase": "False", "flase": "False",
+        "lenght": "length", "lengh": "length",
+        "recieve": "receive", "occured": "occurred",
+        "seperator": "separator",
+    }
+
+    # ── Shell 命令别名表 ────────────────────────────────────────────────────
+    SHELL_COMMAND_ALIASES: Dict[str, List[str]] = {
+        "ls": ["dir"],           # Windows: dir instead of ls
+        "dir": ["ls"],           # Unix: ls instead of dir
+        "cat": ["type"],         # Windows: type instead of cat
+        "type": ["cat"],
+        "copy": ["cp"],          # Windows: copy instead of cp
+        "cp": ["copy"],
+        "del": ["rm"],
+        "rm": ["del"],
+        "move": ["mv"],
+        "mv": ["move"],
+        "cls": ["clear"],
+        "clear": ["cls"],
+        "find": ["fd", "rg"],
+        "grep": ["findstr", "Select-String"],
+        "ipconfig": ["ifconfig"],
+        "ifconfig": ["ipconfig"],
+        "tasklist": ["ps"],
+        "ps": ["tasklist"],
+        "echo": ["Write-Output"],
+    }
+
+    # ── Python builtins(用于 NameError 建议) ────────────────────────────────
+    PYTHON_BUILTINS = set(dir(__builtins__)) if isinstance(__builtins__, dict) else set(dir(__builtins__))  # type: ignore[arg-type]
 
     def __init__(
         self,
@@ -122,48 +183,225 @@ class ExecutionEngine:
         self.auto_fix = auto_fix
         self.max_output_length = max_output_length
         self.work_dir = work_dir or os.getcwd()
+
+        # 安全: 合并正则模式 + 字符串黑名单
         self._blocked = set(self.DANGEROUS_COMMANDS)
         if extra_blocked:
             self._blocked.update(extra_blocked)
 
         self._execution_count = 0
 
+        # ── 启动时缓存: 检测平台 & Shell ────────────────────────────────────
+        self._platform = detect_platform()
+        self._available_shells: Dict[str, str] = {}
+        self._detect_shells()
+
+        # ── 启动时缓存: 基础环境变量(PATH 等) ──────────────────────────────
+        self._cached_base_env = self._build_env(None)
+
+    # ======================================================================
+    # 启动时一次性检测
+    # ======================================================================
+
+    def _detect_shells(self) -> None:
+        """在 __init__ 中调用一次，探测可用 Shell 并缓存路径。"""
+        if self._platform == "windows":
+            # Windows: 依次检测 bash (Git Bash / MSYS2 / WSL) / cmd / PowerShell
+            candidates = [
+                ("bash", shutil.which("bash")),
+                ("git_bash", r"C:\Program Files\Git\bin\bash.exe"),
+                ("git_bash_x86", r"C:\Program Files (x86)\Git\bin\bash.exe"),
+                ("msys2_bash", r"C:\msys64\usr\bin\bash.exe"),
+                ("msys2_mingw", r"C:\msys64\mingw64\bin\bash.exe"),
+                ("wsl_bash", shutil.which("wsl")),
+                ("cmd", "cmd"),
+                ("powershell", shutil.which("powershell")),
+                ("powershell_x86", r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"),
+                ("pwsh", shutil.which("pwsh")),
+            ]
+            for name, path in candidates:
+                if path and (shutil.which(path) is not None or path == "cmd"
+                             or (isinstance(path, str) and os.path.isfile(path))):
+                    self._available_shells[name] = path
+        else:
+            # macOS / Linux: 检测 bash / zsh / sh / fish
+            for shell_name in ("bash", "zsh", "sh", "dash", "fish", "ksh"):
+                found = shutil.which(shell_name)
+                if found:
+                    self._available_shells[shell_name] = found
+            # 用户默认 Shell
+            user_shell = os.environ.get("SHELL", "")
+            if user_shell and os.path.isfile(user_shell):
+                self._available_shells.setdefault("default", user_shell)
+
+        logger.debug(f"[引擎初始化] 检测到 Shell: {list(self._available_shells.keys())}")
+
+    # ======================================================================
+    # 安全检查(正则 + 词边界)
+    # ======================================================================
+
+    @staticmethod
+    def _normalize_command(code: str) -> str:
+        """
+        标准化命令字符串用于安全检测。
+        - 合并连续空白为单个空格
+        - 去除首尾空白
+        """
+        normalized = re.sub(r'\s+', ' ', code.strip())
+        return normalized
+
     def _check_safety(self, code: str) -> Tuple[bool, str]:
-        """检查代码安全性"""
-        code_lower = code.lower().strip()
+        """检查代码安全性: 正则模式(词边界) + 旧式字符串匹配。"""
+        normalized = self._normalize_command(code)
+
+        # 1) 正则模式匹配(词边界)
+        for pattern, description in self.DANGEROUS_PATTERNS:
+            try:
+                if re.search(pattern, normalized, re.IGNORECASE):
+                    return False, f"危险命令被拦截: {description}"
+            except re.error:
+                logger.warning(f"[安全检查] 无效正则模式: {pattern}")
+                continue
+
+        # 2) 旧式字符串匹配(兼容)
+        code_lower = normalized.lower()
         for dangerous in self._blocked:
             if dangerous.lower() in code_lower:
                 return False, f"危险命令被拦截: {dangerous}"
+
         return True, ""
 
-    def _get_shell(self, language: str) -> Tuple[str, List[str]]:
-        """获取执行 shell 和参数"""
-        system = detect_platform()
+    # ======================================================================
+    # Shell 选择(使用缓存)
+    # ======================================================================
 
+    def _get_shell(self, language: str) -> Tuple[str, List[str]]:
+        """获取执行 shell 和参数(利用启动时缓存)。"""
         if language == "python":
             return sys.executable, ["-u", "-c"]
-        elif language in ("shell", "bash"):
-            if system == "windows":
-                # Windows 上尝试 git bash 或 WSL
-                for shell in ["bash", "C:\\Program Files\\Git\\bin\\bash.exe",
-                              "C:\\msys64\\usr\\bin\\bash.exe"]:
-                    if os.path.exists(shell) or shell == "bash":
-                        return shell, ["-c"]
-                # 回退到 cmd
+
+        if language in ("shell", "bash"):
+            if self._platform == "windows":
+                # 优先 Git Bash / MSYS2 bash
+                for key in ("git_bash", "git_bash_x86", "msys2_bash", "msys2_mingw", "bash"):
+                    if key in self._available_shells:
+                        return self._available_shells[key], ["-c"]
                 return "cmd", ["/c"]
-            return "bash", ["-c"]
-        elif language == "powershell":
-            if system == "windows":
-                return "powershell", ["-NoProfile", "-Command"]
-            return "pwsh", ["-NoProfile", "-Command"]
-        elif language == "cmd":
+            # macOS/Linux: 优先 bash → zsh → sh
+            for key in ("bash", "zsh", "sh"):
+                if key in self._available_shells:
+                    return self._available_shells[key], ["-c"]
+            return "sh", ["-c"]
+
+        if language == "powershell":
+            if self._platform == "windows":
+                path = self._available_shells.get("powershell", "powershell")
+                return path, ["-NoProfile", "-Command"]
+            path = self._available_shells.get("pwsh", "pwsh")
+            return path, ["-NoProfile", "-Command"]
+
+        if language == "cmd":
             return "cmd", ["/c"]
-        elif language == "system":
-            if system == "windows":
+
+        if language == "system":
+            if self._platform == "windows":
                 return "cmd", ["/c"]
-            return "bash", ["-c"]
+            for key in ("bash", "zsh", "sh"):
+                if key in self._available_shells:
+                    return self._available_shells[key], ["-c"]
+            return "sh", ["-c"]
+
+        raise ValueError(f"不支持的语言: {language}")
+
+    def _detect_shell_for_code(self, code: str, language: str) -> Optional[Tuple[str, List[str]]]:
+        """
+        根据代码内容推断应使用的 Shell。
+        - Windows 上 .bat/.cmd → cmd.exe /c
+        - .ps1 → PowerShell
+        - macOS/Linux 上检测 shebang 或脚本扩展名
+        """
+        if language not in ("shell", "bash", "system"):
+            return None
+
+        # Windows 特殊路由
+        if self._platform == "windows":
+            # 检测 .bat/.cmd 引用
+            bat_match = re.search(r'[\w.\-]+\.(bat|cmd)\b', code, re.IGNORECASE)
+            if bat_match:
+                return "cmd", ["/c"]
+            # 检测 .ps1 引用
+            ps1_match = re.search(r'[\w.\-]+\.ps1\b', code, re.IGNORECASE)
+            if ps1_match:
+                ps_path = self._available_shells.get("powershell") or "powershell"
+                return ps_path, ["-NoProfile", "-Command"]
         else:
-            raise ValueError(f"不支持的语言: {language}")
+            # macOS/Linux: 检测 shebang
+            shebang_match = re.search(r'^#!\s*/(?:usr/(?:local/)?)?(?:bin|env)/(\w+)', code, re.MULTILINE)
+            if shebang_match:
+                shell_name = shebang_match.group(1)
+                if shell_name in self._available_shells:
+                    return self._available_shells[shell_name], ["-c"]
+
+        return None
+
+    # ======================================================================
+    # 环境变量(使用缓存)
+    # ======================================================================
+
+    def _build_env(self, extra_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """构建执行环境变量。"""
+        env = os.environ.copy()
+
+        # 确保常见路径
+        paths = env.get("PATH", "").split(os.pathsep)
+        common_paths: List[str] = []
+
+        if self._platform == "windows":
+            common_paths = [
+                r"C:\Windows\System32",
+                r"C:\Windows",
+                r"C:\Program Files\Git\bin",
+                r"C:\Program Files (x86)\Git\bin",
+                r"C:\msys64\usr\bin",
+                r"C:\msys64\mingw64\bin",
+            ]
+        else:
+            common_paths = [
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+                str(Path.home() / ".local" / "bin"),
+                str(Path.home() / ".cargo" / "bin"),
+                str(Path.home() / ".npm-global" / "bin"),
+            ]
+
+        for p in common_paths:
+            if p not in paths:
+                paths.insert(0, p)
+        env["PATH"] = os.pathsep.join(paths)
+
+        # Python 相关
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        if extra_env:
+            env.update(extra_env)
+
+        return env
+
+    def _get_env(self, extra_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """获取环境变量(使用缓存的基础环境 + 额外变量)。"""
+        if extra_env:
+            env = dict(self._cached_base_env)
+            env.update(extra_env)
+            return env
+        return self._cached_base_env
+
+    # ======================================================================
+    # 异步执行
+    # ======================================================================
 
     async def execute(
         self,
@@ -269,7 +507,7 @@ class ExecutionEngine:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=work_dir,
-                env=self._build_env(env),
+                env=self._get_env(env),
             )
 
             try:
@@ -312,20 +550,38 @@ class ExecutionEngine:
         env: Optional[Dict[str, str]],
         exec_id: str,
     ) -> ExecResult:
-        """执行 Shell / PowerShell / 系统命令"""
+        """
+        执行 Shell / PowerShell / 系统命令。
+
+        [BUG FIX] 现在正确使用 shell_cmd + shell_args 进行路由:
+          - _get_shell(language) 返回 shell 可执行路径与参数
+          - _detect_shell_for_code() 可根据代码内容覆盖(如 .bat/.cmd/.ps1)
+          - 使用 create_subprocess_exec 而非 create_subprocess_shell
+        """
         start_time = asyncio.get_event_loop().time()
 
+        # 1) 根据语言获取默认 Shell
         shell_cmd, shell_args = self._get_shell(language)
+
+        # 2) 根据代码内容推断是否应覆盖 Shell
+        override = self._detect_shell_for_code(code, language)
+        if override is not None:
+            shell_cmd, shell_args = override
+            logger.debug(f"[{exec_id}] Shell 被代码内容覆盖为: {shell_cmd}")
+
+        # 3) 构建命令列表: [shell_cmd, shell_arg..., code_as_string]
         cmd = [shell_cmd] + shell_args + [code]
 
+        logger.debug(f"[{exec_id}] Shell 命令: {shell_cmd} {' '.join(shell_args)}")
+
         try:
-            process = await asyncio.create_subprocess_shell(
-                code,
+            # [FIX] 使用 create_subprocess_exec + 已计算的 shell_cmd/shell_args
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=work_dir,
-                env=self._build_env(env),
-                shell=True,
+                env=self._get_env(env),
             )
 
             try:
@@ -361,28 +617,9 @@ class ExecutionEngine:
                 execution_time=elapsed,
             )
 
-    def _build_env(self, extra_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """构建执行环境变量"""
-        env = os.environ.copy()
-        # 确保常见路径
-        paths = env.get("PATH", "").split(os.pathsep)
-        common_paths = [
-            "/usr/local/bin", "/usr/bin", "/bin",
-            str(Path.home() / ".local/bin"),
-        ]
-        for p in common_paths:
-            if p not in paths:
-                paths.insert(0, p)
-        env["PATH"] = os.pathsep.join(paths)
-
-        # Python 相关
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-
-        if extra_env:
-            env.update(extra_env)
-
-        return env
+    # ======================================================================
+    # 自动修复(增强: 12 种 Python + 4 种 Shell)
+    # ======================================================================
 
     async def _auto_fix(
         self,
@@ -396,67 +633,256 @@ class ExecutionEngine:
         """
         自动修复常见错误。
 
-        支持的修复策略:
-          - Python: ImportError → 自动 pip install
-          - Python: IndentationError → 自动修复缩进
-          - Shell: command not found → 提示安装
-          - 通用: 截断过长输出
+        Python (12 种模式):
+          1. ModuleNotFoundError → pip install
+          2. ImportError: cannot import name → 建议正确导入路径
+          3. NameError → 检查拼写、内置名
+          4. SyntaxError: unexpected EOF → 补全括号
+          5. TypeError: takes Y arguments → 建议签名
+          6. FileNotFoundError → 建议路径
+          7. PermissionError → 建议权限(不自动 sudo)
+          8. ConnectionError / TimeoutError → 网络建议
+          9. UnicodeEncodeError → 编码头
+          10. IndentationError → 自动修复缩进
+          11. KeyError → 建议可用 key
+          12. JSONDecodeError → JSON 校验建议
+
+        Shell (4 种模式):
+          1. command not found → 正确命令别名
+          2. No such file or directory → 路径建议
+          3. Permission denied → chmod 提示(不自动 sudo)
+          4. syntax error near unexpected token → 引号匹配
         """
         error_text = error_result.stderr or error_result.error or ""
 
         if language == "python":
-            # 策略 1: 自动安装缺失的包
-            if "ModuleNotFoundError" in error_text or "ImportError" in error_text:
-                module = self._extract_missing_module(error_text)
-                if module:
-                    install_code = f"pip install {module}"
-                    logger.info(f"[自动修复] 安装缺失模块: {module}")
-                    install_result = await self._execute_shell(
-                        "system", install_code, timeout, work_dir, env, "auto_fix"
-                    )
-                    if install_result.success:
-                        # 安装成功，重新执行
-                        return await self._execute_python(
-                            original_code, timeout, work_dir, env, "retry"
-                        )
-
-            # 策略 2: 修复编码问题
-            if "UnicodeEncodeError" in error_text:
-                fixed_code = (
-                    "import sys; sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
-                    + original_code
-                )
-                return await self._execute_python(
-                    fixed_code, timeout, work_dir, env, "fix_encoding"
-                )
-
-            # 策略 3: 修复缩进
-            if "IndentationError" in error_text:
-                fixed_code = textwrap.dedent(original_code)
-                if fixed_code != original_code:
-                    return await self._execute_python(
-                        fixed_code, timeout, work_dir, env, "fix_indent"
-                    )
-
+            return await self._auto_fix_python(original_code, error_text, timeout, work_dir, env)
         elif language in ("shell", "bash", "system"):
-            # Shell: 尝试添加 sudo
-            if "Permission denied" in error_text:
-                fixed_code = f"sudo {original_code}"
-                return await self._execute_shell(
-                    "system", fixed_code, timeout, work_dir, env, "fix_perm"
-                )
-
-            # Shell: command not found
-            if "command not found" in error_text:
-                cmd_name = self._extract_command_name(error_text)
-                if cmd_name:
-                    logger.info(f"[自动修复] 命令不存在: {cmd_name}")
+            return await self._auto_fix_shell(original_code, error_text, timeout, work_dir, env, error_result)
 
         return None
 
+    # ── Python 自动修复 ────────────────────────────────────────────────────
+
+    async def _auto_fix_python(
+        self,
+        code: str,
+        error_text: str,
+        timeout: int,
+        work_dir: str,
+        env: Optional[Dict[str, str]],
+    ) -> Optional[ExecResult]:
+        """Python 12 种自动修复模式。"""
+
+        # ── 1. ModuleNotFoundError → pip install ──────────────────────────
+        if "ModuleNotFoundError" in error_text:
+            module = self._extract_missing_module(error_text)
+            if module:
+                install_code = f"pip install {module}"
+                logger.info(f"[自动修复] 安装缺失模块: {module}")
+                install_result = await self._execute_shell(
+                    "system", install_code, timeout, work_dir, env, "auto_fix_install"
+                )
+                if install_result.success:
+                    return await self._execute_python(
+                        code, timeout, work_dir, env, "retry_module"
+                    )
+                # 安装失败则继续尝试其他修复策略
+
+        # ── 2. ImportError: cannot import name → 建议正确导入路径 ─────────
+        if "ImportError" in error_text and "cannot import name" in error_text:
+            match = re.search(r"cannot import name ['\"](\w+)['\"]", error_text)
+            if match:
+                bad_name = match.group(1)
+                # 检查模块是否存在(可能包名不同)
+                module_match = re.search(r"from ['\"](.+?)['\"]", error_text)
+                module_name = module_match.group(1) if module_match else "unknown"
+                logger.info(
+                    f"[自动修复] ImportError: '{bad_name}' 不在 '{module_name}' 中。"
+                    f"请检查模块版本或尝试: from {module_name} import *"
+                )
+
+        # ── 3. NameError: name 'X' is not defined → 检查拼写/内置 ───────
+        if "NameError" in error_text:
+            match = re.search(r"name '(\w+)' is not defined", error_text)
+            if match:
+                undefined_name = match.group(1)
+                suggestion = self._suggest_name_fix(undefined_name)
+                if suggestion:
+                    logger.info(f"[自动修复] NameError: '{undefined_name}' → 建议 '{suggestion}'")
+                    # 尝试自动替换
+                    fixed_code = re.sub(
+                        r'\b' + re.escape(undefined_name) + r'\b',
+                        suggestion,
+                        code,
+                        count=1,
+                    )
+                    if fixed_code != code:
+                        return await self._execute_python(
+                            fixed_code, timeout, work_dir, env, "fix_name"
+                        )
+
+        # ── 4. SyntaxError: unexpected EOF → 补全括号 ──────────────────
+        if "SyntaxError" in error_text and "unexpected EOF" in error_text:
+            fixed_code = self._fix_unclosed_brackets(code)
+            if fixed_code != code:
+                return await self._execute_python(
+                    fixed_code, timeout, work_dir, env, "fix_eof"
+                )
+
+        # ── 5. TypeError: X() takes Y arguments → 建议签名 ─────────────
+        if "TypeError" in error_text:
+            match = re.search(
+                r"(\w+)\(\) (takes|missing) (\d+ (?:positional )?argument|at least \d+)",
+                error_text,
+            )
+            if match:
+                func_name = match.group(1)
+                logger.info(
+                    f"[自动修复] TypeError: {func_name}() 参数数量不匹配。"
+                    f"请检查函数签名。"
+                )
+
+        # ── 6. FileNotFoundError → 建议路径 ────────────────────────────
+        if "FileNotFoundError" in error_text:
+            match = re.search(r"No such file or directory: ['\"](.+?)['\"]", error_text)
+            if match:
+                missing_path = match.group(1)
+                dir_part = os.path.dirname(missing_path)
+                logger.info(
+                    f"[自动修复] FileNotFoundError: '{missing_path}'。"
+                    f"请检查路径是否存在。尝试列出目录: ls {dir_part or '.'}"
+                )
+                # 尝试列出目录内容作为提示
+                if dir_part and os.path.isdir(dir_part):
+                    listing = os.listdir(dir_part)
+                    logger.info(f"  目录内容: {listing[:20]}")
+
+        # ── 7. PermissionError → 建议权限(不自动 sudo) ─────────────────
+        if "PermissionError" in error_text:
+            match = re.search(r"\[Errno 13\] Permission denied: ['\"](.+?)['\"]", error_text)
+            if match:
+                denied_path = match.group(1)
+                logger.info(
+                    f"[自动修复] PermissionError: '{denied_path}'。"
+                    f"请手动检查文件权限: ls -la '{denied_path}'"
+                )
+
+        # ── 8. ConnectionError / TimeoutError → 网络建议 ────────────────
+        if "ConnectionError" in error_text or "TimeoutError" in error_text or "ConnectionRefusedError" in error_text:
+            logger.info(
+                "[自动修复] 网络连接失败。"
+                "请检查网络连接、代理设置或目标服务是否可用。"
+            )
+
+        # ── 9. UnicodeEncodeError → 编码头 ──────────────────────────────
+        if "UnicodeEncodeError" in error_text:
+            fixed_code = (
+                "import sys; sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
+                + code
+            )
+            return await self._execute_python(
+                fixed_code, timeout, work_dir, env, "fix_encoding"
+            )
+
+        # ── 10. IndentationError → 自动修复缩进 ─────────────────────────
+        if "IndentationError" in error_text:
+            fixed_code = self._fix_indentation(code)
+            if fixed_code != code:
+                return await self._execute_python(
+                    fixed_code, timeout, work_dir, env, "fix_indent"
+                )
+
+        # ── 11. KeyError → 建议可用 key ────────────────────────────────
+        if "KeyError" in error_text:
+            match = re.search(r"KeyError: ['\"](.+?)['\"]", error_text)
+            if match:
+                missing_key = match.group(1)
+                logger.info(
+                    f"[自动修复] KeyError: '{missing_key}'。"
+                    f"字典中不存在该键，请检查键名拼写。"
+                )
+
+        # ── 12. json.decoder.JSONDecodeError → JSON 校验建议 ────────────
+        if "JSONDecodeError" in error_text:
+            logger.info(
+                "[自动修复] JSONDecodeError: JSON 格式无效。"
+                "请检查 JSON 字符串是否正确(缺少引号、多余逗号、未转义字符等)。"
+            )
+
+        return None
+
+    # ── Shell 自动修复 ─────────────────────────────────────────────────────
+
+    async def _auto_fix_shell(
+        self,
+        code: str,
+        error_text: str,
+        timeout: int,
+        work_dir: str,
+        env: Optional[Dict[str, str]],
+        error_result: ExecResult,
+    ) -> Optional[ExecResult]:
+        """Shell 4 种自动修复模式。"""
+
+        # ── 1. command not found → 正确命令别名 ──────────────────────────
+        if "command not found" in error_text:
+            cmd_name = self._extract_command_name(error_text)
+            if cmd_name:
+                alias = self._suggest_shell_alias(cmd_name)
+                logger.info(
+                    f"[自动修复] 命令不存在: '{cmd_name}'。"
+                    f"你是否想用: {alias}?"
+                )
+
+        # ── 2. No such file or directory → 路径建议 ─────────────────────
+        if "No such file or directory" in error_text:
+            match = re.search(r"No such file or directory:\s*'(.+?)'", error_text)
+            if not match:
+                match = re.search(r":\s*(\S+):\s*No such file or directory", error_text)
+            if match:
+                missing_path = match.group(1)
+                logger.info(
+                    f"[自动修复] 文件/目录不存在: '{missing_path}'。"
+                    f"请检查路径是否正确。尝试: ls {os.path.dirname(missing_path) or '.'}"
+                )
+
+        # ── 3. Permission denied → chmod 提示(不自动 sudo) ─────────────
+        if "Permission denied" in error_text:
+            logger.warning(
+                f"[自动修复] 权限不足，已拦截自动 sudo 执行。"
+                f"请用户手动以提升权限运行该命令。原始命令: {code[:200]}"
+            )
+            # [SECURITY FIX] 不自动执行 sudo，返回提示
+            return ExecResult(
+                success=False,
+                error=(
+                    "⚠️ 权限不足: 命令需要提升权限。\n"
+                    "安全策略: 引擎不会自动使用 sudo。\n"
+                    f"请手动执行: sudo {code}"
+                ),
+                stderr=error_text,
+                exit_code=error_result.exit_code,
+                metadata={"sudo_blocked": True, "original_code": code},
+            )
+
+        # ── 4. syntax error near unexpected token → 引号匹配 ────────────
+        if "syntax error near unexpected token" in error_text:
+            token_match = re.search(r"syntax error near unexpected token\s+`(.+?)'", error_text)
+            token = token_match.group(1) if token_match else "unknown"
+            logger.info(
+                f"[自动修复] Shell 语法错误，unexpected token: '{token}'。"
+                f"请检查引号是否正确匹配，以及是否有多余或缺失的特殊字符。"
+            )
+
+        return None
+
+    # ======================================================================
+    # 辅助方法
+    # ======================================================================
+
     def _extract_missing_module(self, error_text: str) -> Optional[str]:
         """从错误信息中提取缺失的模块名"""
-        import re
         # ModuleNotFoundError: No module named 'xxx'
         match = re.search(r"No module named ['\"](.+?)['\"]", error_text)
         if match:
@@ -469,11 +895,102 @@ class ExecutionEngine:
 
     def _extract_command_name(self, error_text: str) -> Optional[str]:
         """从错误信息中提取命令名"""
-        import re
-        match = re.search(r"(\w+): command not found", error_text)
+        match = re.search(r"(\w+):\s*command not found", error_text)
         if match:
             return match.group(1)
         return None
+
+    def _suggest_name_fix(self, name: str) -> Optional[str]:
+        """
+        对 NameError 中的未定义名称提供建议:
+          1. 检查常见拼写错误表
+          2. 检查 Python 内置名
+          3. 使用编辑距离(简单 Levenshtein)查找相近名
+        """
+        name_lower = name.lower()
+
+        # 1) 精确拼写错误
+        if name_lower in self.COMMON_MISSPELLINGS:
+            return self.COMMON_MISSPELLINGS[name_lower]
+
+        # 2) 内置名(精确匹配)
+        if name in self.PYTHON_BUILTINS:
+            return name  # 已是内置名但可能大小写不对
+
+        # 3) 内置名(忽略大小写)
+        for builtin in self.PYTHON_BUILTINS:
+            if isinstance(builtin, str) and builtin.lower() == name_lower:
+                return builtin
+
+        # 4) 简单编辑距离(距离 ≤ 2 视为建议)
+        best_match: Optional[str] = None
+        best_dist = 3
+        for builtin in self.PYTHON_BUILTINS:
+            if not isinstance(builtin, str):
+                continue
+            dist = self._levenshtein_distance(name.lower(), builtin.lower())
+            if dist < best_dist and dist <= 2:
+                best_dist = dist
+                best_match = builtin
+
+        return best_match
+
+    @staticmethod
+    def _levenshtein_distance(s1: str, s2: str) -> int:
+        """简单 Levenshtein 编辑距离。"""
+        if len(s1) < len(s2):
+            return ExecutionEngine._levenshtein_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        prev_row = list(range(len(s2) + 1))
+        for i, c1 in enumerate(s1):
+            curr_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = prev_row[j + 1] + 1
+                deletions = curr_row[j] + 1
+                substitutions = prev_row[j] + (c1 != c2)
+                curr_row.append(min(insertions, deletions, substitutions))
+            prev_row = curr_row
+        return prev_row[-1]
+
+    def _fix_unclosed_brackets(self, code: str) -> str:
+        """尝试补全未闭合的括号/方括号/花括号。"""
+        open_brackets = "([{"
+        close_brackets = ")]}"
+        stack: List[str] = []
+        # 只检查行尾，不解析字符串内容(简化版)
+        for char in code:
+            if char in open_brackets:
+                stack.append(char)
+            elif char in close_brackets:
+                if stack:
+                    stack.pop()
+        # 补全未闭合的
+        if stack:
+            fix_map = {"(": ")", "[": "]", "{": "}"}
+            code += "\n" + "".join(fix_map.get(c, "") for c in reversed(stack))
+        return code
+
+    def _fix_indentation(self, code: str) -> str:
+        """修复常见缩进问题。"""
+        # 1) textwrap.dedent 移除整体缩进
+        fixed = textwrap.dedent(code)
+        # 2) Tab → 4 空格
+        fixed = fixed.replace("\t", "    ")
+        # 3) 移除行尾空白
+        fixed = "\n".join(line.rstrip() for line in fixed.splitlines()) + ("\n" if code.endswith("\n") else "")
+        return fixed
+
+    def _suggest_shell_alias(self, cmd_name: str) -> str:
+        """根据平台为 command not found 的命令建议正确名称。"""
+        aliases = self.SHELL_COMMAND_ALIASES.get(cmd_name, [])
+        if aliases:
+            return " / ".join(aliases)
+        return f"(无已知别名，请检查命令拼写或确认已安装)"
+
+    # ======================================================================
+    # 同步执行(修复 asyncio 安全模式)
+    # ======================================================================
 
     def execute_sync(
         self,
@@ -481,10 +998,30 @@ class ExecutionEngine:
         code: str,
         **kwargs,
     ) -> ExecResult:
-        """同步执行(便捷方法)"""
-        return asyncio.get_event_loop().run_until_complete(
-            self.execute(language, code, **kwargs)
-        )
+        """
+        同步执行(便捷方法)。
+
+        [BUG FIX] 安全处理 asyncio 事件循环:
+          - 如果已有运行中的 loop → 使用 ThreadPoolExecutor 隔离
+          - 否则 → 直接 asyncio.run()
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(
+                    asyncio.run, self.execute(language, code, **kwargs)
+                ).result()
+        else:
+            return asyncio.run(self.execute(language, code, **kwargs))
+
+    # ======================================================================
+    # 统计信息
+    # ======================================================================
 
     def get_stats(self) -> Dict[str, Any]:
         """获取执行统计"""
@@ -493,4 +1030,7 @@ class ExecutionEngine:
             "timeout": self.timeout,
             "max_retries": self.max_retries,
             "auto_fix_enabled": self.auto_fix,
+            "platform": self._platform,
+            "available_shells": list(self._available_shells.keys()),
+            "env_cached": True,
         }

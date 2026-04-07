@@ -11,9 +11,12 @@ memory/manager.py - 记忆管理器
 from __future__ import annotations
 
 import json
+import math
+import re
 import sqlite3
 import time
 import threading
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -466,17 +469,141 @@ class MemoryManager:
     # 记忆搜索
     # ==========================================================================
 
+    # ==========================================================================
+    # TF-IDF 语义搜索 (无外部依赖)
+    # ==========================================================================
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        """
+        中文分词（简单实现：单字+双字组合）+ 英文词提取。
+
+        对中文文本提取单字和相邻双字作为 token，
+        对英文文本按空格和标点分词并转小写。
+        """
+        if not text:
+            return []
+
+        tokens: List[str] = []
+        # 提取中文连续片段
+        chinese_segments = re.findall(r'[\u4e00-\u9fff]+', text)
+        for seg in chinese_segments:
+            # 单字
+            tokens.extend(list(seg))
+            # 双字组合
+            for i in range(len(seg) - 1):
+                tokens.append(seg[i:i + 2])
+
+        # 提取英文/数字单词
+        english_words = re.findall(r'[a-zA-Z0-9]+', text.lower())
+        tokens.extend(english_words)
+
+        return tokens
+
+    @staticmethod
+    def _compute_tf(tokens: List[str]) -> Counter:
+        """计算词频 (Term Frequency)"""
+        return Counter(tokens)
+
+    @classmethod
+    def _compute_tfidf(
+        cls,
+        query: str,
+        documents: List[Tuple[str, str]],  # [(id, text), ...]
+    ) -> Dict[str, float]:
+        """
+        计算 TF-IDF 相似度得分。
+
+        Args:
+            query: 查询文本
+            documents: 文档列表 [(doc_id, text), ...]
+
+        Returns:
+            {doc_id: tfidf_score} 按得分降序排列
+        """
+        if not documents or not query:
+            return {}
+
+        query_tokens = cls._tokenize(query)
+        if not query_tokens:
+            return {}
+
+        # 文档数量
+        n_docs = len(documents)
+
+        # 计算每个文档的 TF
+        doc_tfs: Dict[str, Counter] = {}
+        for doc_id, text in documents:
+            doc_tfs[doc_id] = cls._compute_tf(cls._tokenize(text))
+
+        # 计算 IDF: log(N / (1 + df))  df=包含该词的文档数
+        doc_freq: Counter = Counter()
+        for doc_id, tf in doc_tfs.items():
+            for token in set(tf.keys()):
+                doc_freq[token] += 1
+
+        idf: Dict[str, float] = {}
+        for token, df in doc_freq.items():
+            idf[token] = math.log((n_docs + 1) / (1 + df)) + 1
+
+        # 查询的 TF
+        query_tf = cls._compute_tf(query_tokens)
+
+        # 计算每个文档与查询的余弦相似度
+        scores: Dict[str, float] = {}
+        all_tokens = set(query_tf.keys())
+        for doc_id, tf in doc_tfs.items():
+            all_tokens.update(tf.keys())
+
+        # 计算查询向量的模
+        query_norm = math.sqrt(
+            sum((query_tf.get(t, 0) * idf.get(t, 0)) ** 2 for t in query_tf)
+        )
+        if query_norm == 0:
+            return {}
+
+        # 计算每个文档与查询的余弦相似度
+        for doc_id in doc_tfs:
+            doc_tf = doc_tfs[doc_id]
+            dot_product = 0.0
+            for token in query_tf:
+                if token in doc_tf:
+                    dot_product += (query_tf[token] * idf.get(token, 0)) * \
+                                   (doc_tf[token] * idf.get(token, 0))
+
+            doc_norm = math.sqrt(
+                sum((doc_tf.get(t, 0) * idf.get(t, 0)) ** 2 for t in doc_tf)
+            ) if doc_tf else 0
+
+            if doc_norm > 0:
+                scores[doc_id] = dot_product / (query_norm * doc_norm)
+            else:
+                scores[doc_id] = 0.0
+
+        return dict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
+
     def search(
         self,
         query: str,
         session_id: str = "",
         category: str = "",
         limit: int = 10,
+        mode: str = "hybrid",
     ) -> List[MemoryEntry]:
         """
-        关键词搜索记忆。
+        搜索记忆。
 
-        在 content, summary, key, metadata 中搜索匹配项。
+        支持三种搜索模式:
+          - "keyword": 传统 LIKE 关键词匹配（快速）
+          - "semantic": TF-IDF 语义搜索（理解语义相似性）
+          - "hybrid": 混合搜索（默认）= 0.4 * keyword_score + 0.6 * tfidf_score
+
+        Args:
+            query: 搜索查询
+            session_id: 会话 ID（空=所有会话）
+            category: 记忆类别（空=所有类别）
+            limit: 返回数量
+            mode: 搜索模式 "keyword" | "semantic" | "hybrid"
         """
         conn = self._get_conn()
         conditions = ["1=1"]
@@ -493,23 +620,68 @@ class MemoryManager:
         conditions.append("(expires_at = '' OR expires_at > ?)")
         params.append(timestamp())
 
-        # 关键词搜索
-        like_pattern = f"%{query}%"
-        conditions.append(
-            "(content LIKE ? OR summary LIKE ? OR key LIKE ? OR metadata LIKE ?)"
-        )
-        params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
-
         where = " AND ".join(conditions)
+
+        if mode == "keyword":
+            return self._search_keyword(conn, query, where, params, limit)
+        elif mode == "semantic":
+            return self._search_semantic(conn, query, where, params, limit)
+        else:
+            # 混合模式：取两种搜索结果的加权和
+            keyword_results = self._search_keyword(conn, query, where, params, limit * 2)
+            semantic_results = self._search_semantic(conn, query, where, params, limit * 2)
+
+            # 合并评分
+            combined: Dict[str, Tuple[MemoryEntry, float]] = {}
+            for i, entry in enumerate(keyword_results):
+                score = 1.0 - (i / max(len(keyword_results), 1))
+                combined[entry.id] = (entry, score * 0.4)
+
+            for i, entry in enumerate(semantic_results):
+                score = 1.0 - (i / max(len(semantic_results), 1))
+                if entry.id in combined:
+                    combined[entry.id] = (entry, combined[entry.id][1] + score * 0.6)
+                else:
+                    combined[entry.id] = (entry, score * 0.6)
+
+            # 按综合得分排序
+            sorted_results = sorted(
+                combined.values(),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+
+            # 更新访问计数
+            for entry, _ in sorted_results[:limit]:
+                conn.execute(
+                    "UPDATE memories SET access_count = access_count + 1 WHERE id = ?",
+                    (entry.id,),
+                )
+            conn.commit()
+
+            return [entry for entry, _ in sorted_results[:limit]]
+
+    def _search_keyword(
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        where: str,
+        params: list,
+        limit: int,
+    ) -> List[MemoryEntry]:
+        """关键词 LIKE 搜索"""
+        like_pattern = f"%{query}%"
+        conditions = f"{where} AND (content LIKE ? OR summary LIKE ? OR key LIKE ?)"
+        search_params = params + [like_pattern, like_pattern, like_pattern]
+
         sql = f"""
-            SELECT * FROM memories WHERE {where}
+            SELECT * FROM memories WHERE {conditions}
             ORDER BY importance DESC, access_count DESC
             LIMIT ?
         """
-        params.append(limit)
-        rows = conn.execute(sql, params).fetchall()
+        search_params.append(limit)
+        rows = conn.execute(sql, search_params).fetchall()
 
-        # 更新访问计数
         for row in rows:
             conn.execute(
                 "UPDATE memories SET access_count = access_count + 1 WHERE id = ?",
@@ -519,14 +691,57 @@ class MemoryManager:
 
         return [MemoryEntry.from_row(row) for row in rows]
 
+    def _search_semantic(
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        where: str,
+        params: list,
+        limit: int,
+    ) -> List[MemoryEntry]:
+        """TF-IDF 语义搜索"""
+        # 先取一批候选文档
+        candidate_sql = f"SELECT * FROM memories WHERE {where} ORDER BY created_at DESC LIMIT 200"
+        rows = conn.execute(candidate_sql, params).fetchall()
+
+        if not rows:
+            return []
+
+        # 构建文档列表（content + summary + key 混合文本）
+        documents = []
+        row_map: Dict[str, sqlite3.Row] = {}
+        for row in rows:
+            doc_id = row["id"]
+            text = f"{row['content']} {row['summary']} {row['key']}"
+            documents.append((doc_id, text))
+            row_map[doc_id] = row
+
+        # 计算 TF-IDF 得分
+        scores = self._compute_tfidf(query, documents)
+
+        # 按得分排序，取 top N
+        top_ids = list(scores.keys())[:limit]
+        result = [MemoryEntry.from_row(row_map[doc_id]) for doc_id in top_ids if doc_id in row_map]
+
+        # 更新访问计数
+        for entry in result:
+            conn.execute(
+                "UPDATE memories SET access_count = access_count + 1 WHERE id = ?",
+                (entry.id,),
+            )
+        conn.commit()
+
+        return result
+
     def search_across_sessions(
         self,
         query: str,
         category: str = "",
         limit: int = 20,
+        mode: str = "hybrid",
     ) -> List[MemoryEntry]:
         """跨会话搜索"""
-        return self.search(query, session_id="", category=category, limit=limit)
+        return self.search(query, session_id="", category=category, limit=limit, mode=mode)
 
     # ==========================================================================
     # 记忆总结与维护

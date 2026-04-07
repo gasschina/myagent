@@ -2,14 +2,24 @@
 core/llm.py - LLM 客户端模块
 =============================
 统一封装多种 LLM 提供商的调用接口。
-支持: OpenAI, Anthropic (Claude), Ollama (本地), 自定义兼容接口
+支持: OpenAI, Anthropic (Claude), Ollama (本地), Zhipu GLM, 自定义兼容接口
+
+增强功能:
+- JSON 严格解析（4 策略）
+- 流式输出 (Streaming)
+- Token 用量追踪 & 费用统计
+- 全局重试 + 指数退避
+- asyncio 现代化 (get_running_loop)
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 import asyncio
-from typing import Optional, Dict, Any, List, Generator
+from typing import (
+    Optional, Dict, Any, List, Generator, AsyncGenerator,
+)
 from dataclasses import dataclass, field
 
 from core.logger import get_logger
@@ -74,6 +84,8 @@ class LLMClient:
     """
     统一 LLM 客户端，支持多种提供商。
 
+    支持提供商: openai, anthropic, ollama, zhipu, custom
+
     使用示例:
         client = LLMClient(provider="openai", api_key="sk-...", model="gpt-4")
         response = await client.chat([Message(role="user", content="你好")])
@@ -102,6 +114,86 @@ class LLMClient:
         self.extra = kwargs
         self._client = None
 
+        # ---- Token 用量追踪 ----
+        self._total_prompt_tokens: int = 0
+        self._total_completion_tokens: int = 0
+        self._total_tokens_used: int = 0
+        self._total_cost: float = 0.0
+        self._call_count: int = 0
+
+    # ------------------------------------------------------------------
+    # Token 用量 & 费用追踪
+    # ------------------------------------------------------------------
+
+    def _record_usage(self, usage: Dict[str, int], model: str = ""):
+        """记录一次调用的 token 用量并估算费用。"""
+        prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
+        completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+        total = prompt + completion
+
+        self._total_prompt_tokens += prompt
+        self._total_completion_tokens += completion
+        self._total_tokens_used += total
+        self._call_count += 1
+
+        # 简单费用估算 (每百万 token, 粗略均价)
+        cost = self._estimate_cost(prompt, completion, model or self.model)
+        self._total_cost += cost
+
+    @staticmethod
+    def _estimate_cost(prompt_tokens: int, completion_tokens: int, model: str) -> float:
+        """
+        按模型粗略估算 API 费用 (USD)。
+        价格基于 2024 年公开信息，仅做参考。
+        """
+        # (input price per 1M tokens, output price per 1M tokens)
+        pricing: Dict[str, tuple] = {
+            "gpt-4": (30.0, 60.0),
+            "gpt-4-turbo": (10.0, 30.0),
+            "gpt-4o": (2.5, 10.0),
+            "gpt-4o-mini": (0.15, 0.6),
+            "gpt-3.5-turbo": (0.5, 1.5),
+            "claude-3-opus": (15.0, 75.0),
+            "claude-3-sonnet": (3.0, 15.0),
+            "claude-3-haiku": (0.25, 1.25),
+            "claude-3.5-sonnet": (3.0, 15.0),
+            "glm-4": (14.0, 14.0),
+            "glm-4-flash": (0.1, 0.1),
+            "glm-4-plus": (10.0, 10.0),
+        }
+        # 找到最匹配的模型价格
+        input_price, output_price = 2.0, 8.0  # 默认
+        for model_key, (ip, op) in pricing.items():
+            if model_key in model:
+                input_price, output_price = ip, op
+                break
+        return (prompt_tokens / 1_000_000) * input_price + (completion_tokens / 1_000_000) * output_price
+
+    def get_usage_stats(self) -> Dict[str, Any]:
+        """获取用量统计。"""
+        return {
+            "total_prompt_tokens": self._total_prompt_tokens,
+            "total_completion_tokens": self._total_completion_tokens,
+            "total_tokens_used": self._total_tokens_used,
+            "total_cost_usd": round(self._total_cost, 6),
+            "call_count": self._call_count,
+            "model": self.model,
+            "provider": self.provider,
+        }
+
+    def reset_usage(self):
+        """重置用量统计。"""
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._total_tokens_used = 0
+        self._total_cost = 0.0
+        self._call_count = 0
+        logger.info("用量统计已重置")
+
+    # ------------------------------------------------------------------
+    # 客户端初始化
+    # ------------------------------------------------------------------
+
     def _ensure_client(self):
         """延迟初始化 LLM 客户端"""
         if self._client is not None:
@@ -113,6 +205,8 @@ class LLMClient:
             self._init_anthropic()
         elif self.provider == "ollama":
             self._init_ollama()
+        elif self.provider == "zhipu":
+            self._init_zhipu()
         else:
             raise ValueError(f"不支持的 LLM 提供商: {self.provider}")
 
@@ -154,6 +248,80 @@ class LLMClient:
         except ImportError:
             raise ImportError("请安装 requests: pip install requests")
 
+    def _init_zhipu(self):
+        """初始化 Zhipu (智谱) GLM 客户端
+
+        使用 OpenAI 兼容接口:
+        - API base: https://open.bigmodel.cn/api/paas/v4/
+        - 环境变量: ZHIPUAI_API_KEY
+        """
+        try:
+            from openai import OpenAI
+            import os
+
+            api_key = self.api_key or os.environ.get("ZHIPUAI_API_KEY", "")
+            if not api_key:
+                raise ValueError(
+                    "Zhipu API Key 未设置，请传入 api_key 或设置 ZHIPUAI_API_KEY 环境变量"
+                )
+
+            base_url = self.base_url or "https://open.bigmodel.cn/api/paas/v4/"
+            self.base_url = base_url
+
+            self._client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+            )
+            if not self.model or self.model == "gpt-4":
+                self.model = "glm-4-flash"
+            logger.info(f"Zhipu GLM 客户端已初始化 (model={self.model}, url={base_url})")
+        except ImportError:
+            raise ImportError("请安装 openai: pip install openai")
+
+    # ------------------------------------------------------------------
+    # 核心 Chat 方法 (含重试)
+    # ------------------------------------------------------------------
+
+    async def _run_with_retry(self, func, *args, **kwargs):
+        """
+        带指数退避的通用重试包装器。
+
+        重试策略:
+        - 最多 self.max_retries 次 (默认 3)
+        - 退避延迟: 1s, 2s, 4s, ...
+        - 重试条件: 连接错误 / 速率限制 / 服务器错误
+        """
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                error_lower = str(e).lower()
+                # 判断是否值得重试
+                is_retryable = any(keyword in error_lower for keyword in (
+                    "connection",
+                    "timeout",
+                    "rate_limit",
+                    "rate limit",
+                    "429",
+                    "500",
+                    "502",
+                    "503",
+                    "504",
+                    "overloaded",
+                    "capacity",
+                ))
+                if not is_retryable or attempt >= self.max_retries - 1:
+                    raise
+                delay = 1.0 * (2 ** attempt)  # 1s, 2s, 4s ...
+                logger.warning(
+                    f"LLM 调用第 {attempt + 1}/{self.max_retries} 次重试 "
+                    f"(延迟 {delay:.1f}s): {e}"
+                )
+                await asyncio.sleep(delay)
+        raise last_error  # type: ignore
+
     async def chat(
         self,
         messages: List[Message],
@@ -192,21 +360,34 @@ class LLMClient:
         request_kwargs.update(kwargs)
 
         try:
-            if self.provider in ("openai", "custom"):
-                return await self._chat_openai(request_kwargs)
+            if self.provider in ("openai", "custom", "zhipu"):
+                response = await self._run_with_retry(self._chat_openai, request_kwargs)
             elif self.provider == "anthropic":
-                return await self._chat_anthropic(messages, request_kwargs)
+                response = await self._run_with_retry(
+                    self._chat_anthropic, messages, request_kwargs
+                )
             elif self.provider == "ollama":
-                return await self._chat_ollama(request_kwargs)
+                response = await self._run_with_retry(self._chat_ollama, request_kwargs)
+            else:
+                return LLMResponse(success=False, error="未知提供商")
+
+            # 记录用量
+            if response.usage:
+                self._record_usage(response.usage, response.model)
+
+            return response
+
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             return LLMResponse(success=False, error=str(e))
 
-        return LLMResponse(success=False, error="未知提供商")
+    # ------------------------------------------------------------------
+    # 提供商专属调用方法
+    # ------------------------------------------------------------------
 
     async def _chat_openai(self, kwargs: dict) -> LLMResponse:
-        """OpenAI / 兼容接口调用"""
-        loop = asyncio.get_event_loop()
+        """OpenAI / 兼容接口调用 (含 Zhipu)"""
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None, lambda: self._client.chat.completions.create(**kwargs)
         )
@@ -244,7 +425,7 @@ class LLMClient:
 
     async def _chat_anthropic(self, messages: List[Message], kwargs: dict) -> LLMResponse:
         """Anthropic Claude 接口调用"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # 转换消息格式
         system_msg = ""
@@ -285,7 +466,7 @@ class LLMClient:
     async def _chat_ollama(self, kwargs: dict) -> LLMResponse:
         """Ollama 本地模型调用"""
         import requests
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         url = f"{self.base_url}/api/chat"
         payload = {
@@ -314,15 +495,375 @@ class LLMClient:
             finish_reason="stop" if result.get("done") else "",
         )
 
+    # ------------------------------------------------------------------
+    # 流式输出 (Streaming)
+    # ------------------------------------------------------------------
+
+    async def chat_stream(
+        self,
+        messages: List[Message],
+        tools: Optional[List[Dict]] = None,
+        tool_choice: str = "auto",
+        response_format: Optional[Dict] = None,
+        **kwargs,
+    ) -> AsyncGenerator[str, None]:
+        """
+        流式聊天：逐 chunk yield 文本片段。
+
+        Args:
+            messages: 消息列表
+            tools: 可用工具列表
+            tool_choice: 工具选择策略
+            response_format: 响应格式
+            **kwargs: 额外参数
+
+        Yields:
+            str: 每次 yield 一个文本 chunk
+        """
+        self._ensure_client()
+
+        msg_dicts = [m.to_dict() for m in messages]
+        request_kwargs = {
+            "model": self.model,
+            "messages": msg_dicts,
+            "temperature": kwargs.pop("temperature", self.temperature),
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        if tools:
+            request_kwargs["tools"] = tools
+            request_kwargs["tool_choice"] = tool_choice
+        if response_format:
+            request_kwargs["response_format"] = response_format
+        request_kwargs.update(kwargs)
+
+        try:
+            if self.provider in ("openai", "custom", "zhipu"):
+                async for chunk in self._stream_openai(request_kwargs):
+                    yield chunk
+            elif self.provider == "anthropic":
+                async for chunk in self._stream_anthropic(messages, request_kwargs):
+                    yield chunk
+            elif self.provider == "ollama":
+                async for chunk in self._stream_ollama(request_kwargs):
+                    yield chunk
+            else:
+                logger.error(f"流式调用不支持提供商: {self.provider}")
+        except Exception as e:
+            logger.error(f"流式 LLM 调用失败: {e}")
+
+    async def _stream_openai(self, kwargs: dict) -> AsyncGenerator[str, None]:
+        """OpenAI / 兼容接口 (含 Zhipu) 流式调用"""
+        loop = asyncio.get_running_loop()
+
+        def _create_stream():
+            return self._client.chat.completions.create(**kwargs)
+
+        stream = await loop.run_in_executor(None, _create_stream)
+
+        # 使用迭代器在 executor 中逐步获取
+        def _next_chunk(it):
+            try:
+                return next(it)
+            except StopIteration:
+                return None
+
+        iterator = iter(stream)
+        while True:
+            chunk = await loop.run_in_executor(None, _next_chunk, iterator)
+            if chunk is None:
+                break
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+    async def _stream_anthropic(
+        self, messages: List[Message], kwargs: dict
+    ) -> AsyncGenerator[str, None]:
+        """Anthropic Claude 流式调用"""
+        loop = asyncio.get_running_loop()
+
+        # 转换消息格式
+        system_msg = ""
+        anth_messages = []
+        for m in messages:
+            if m.role == "system":
+                system_msg = m.content
+                continue
+            anth_messages.append({"role": m.role, "content": m.content})
+
+        create_kwargs = {
+            "model": self.model,
+            "messages": anth_messages,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        if system_msg:
+            create_kwargs["system"] = system_msg
+
+        def _create_stream():
+            return self._client.messages.create(**create_kwargs)
+
+        stream = await loop.run_in_executor(None, _create_stream)
+
+        def _next_event(it):
+            try:
+                return next(it)
+            except StopIteration:
+                return None
+
+        iterator = iter(stream)
+        while True:
+            event = await loop.run_in_executor(None, _next_event, iterator)
+            if event is None:
+                break
+            if event.type == "content_block_delta":
+                if hasattr(event.delta, "text"):
+                    yield event.delta.text
+
+    async def _stream_ollama(self, kwargs: dict) -> AsyncGenerator[str, None]:
+        """Ollama 流式调用"""
+        import requests
+        loop = asyncio.get_running_loop()
+
+        url = f"{self.base_url}/api/chat"
+        payload = {
+            "model": self.model,
+            "messages": kwargs["messages"],
+            "stream": True,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            }
+        }
+
+        def _request_stream():
+            return requests.post(url, json=payload, timeout=self.timeout, stream=True)
+
+        resp = await loop.run_in_executor(None, _request_stream)
+        resp.raise_for_status()
+
+        import io
+        buffer = ""
+
+        def _read_chunk():
+            nonlocal buffer
+            # Read line by line from streaming response
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                decoded = line.decode("utf-8")
+                try:
+                    data = json.loads(decoded)
+                    return data.get("message", {}).get("content", "")
+                except json.JSONDecodeError:
+                    continue
+            return None
+
+        while True:
+            chunk = await loop.run_in_executor(None, _read_chunk)
+            if chunk is None:
+                break
+            if chunk:
+                yield chunk
+
+    # ------------------------------------------------------------------
+    # 同步包装
+    # ------------------------------------------------------------------
+
     def chat_sync(
         self,
         messages: List[Message],
         **kwargs,
     ) -> LLMResponse:
         """同步版本聊天方法"""
-        return asyncio.get_event_loop().run_until_complete(
-            self.chat(messages, **kwargs)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, self.chat(messages, **kwargs))
+                return future.result()
+        else:
+            return asyncio.run(self.chat(messages, **kwargs))
+
+    # ------------------------------------------------------------------
+    # JSON 严格解析 (4 策略)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_json_strict(text: str) -> Any:
+        """
+        使用 4 种策略严格解析 JSON 字符串。
+
+        策略:
+          1. 直接 json.loads()
+          2. 提取 markdown 代码块 (```json ... ```)
+          3. 提取第一个 { 到最后一个 } (正则)
+          4. 提取第一个 [ 到最后一个 ] (正则)
+
+        Returns:
+            解析后的 Python 对象，全部失败返回 None。
+        """
+        if not text:
+            return None
+
+        # 策略 1: 直接解析
+        try:
+            return json.loads(text.strip())
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 策略 2: 提取 ```json ... ``` 代码块
+        code_block_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
+        matches = re.findall(code_block_pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                return json.loads(match.strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+        # 策略 3: 提取第一个 { 到最后一个 }
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace != -1 and last_brace > first_brace:
+            try:
+                return json.loads(text[first_brace:last_brace + 1])
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # 策略 4: 提取第一个 [ 到最后一个 ]
+        first_bracket = text.find("[")
+        last_bracket = text.rfind("]")
+        if first_bracket != -1 and last_bracket > first_bracket:
+            try:
+                return json.loads(text[first_bracket:last_bracket + 1])
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return None
+
+    async def chat_json_strict(
+        self,
+        messages: List[Message],
+        required_fields: Optional[List[str]] = None,
+        max_retries: int = 2,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        发送聊天请求并严格解析为 JSON 对象。
+
+        特性:
+        - 自动注入 JSON 模式系统指令
+        - 使用 temperature=0 确保确定性
+        - 4 策略严格解析
+        - 失败自动重试 (默认 1 次)
+        - 校验 required_fields
+
+        Args:
+            messages: 消息列表
+            required_fields: 必需字段列表
+            max_retries: 解析失败最大重试次数 (默认 2，即原始 + 1 次重试)
+            **kwargs: 额外参数
+
+        Returns:
+            解析后的字典
+        """
+        # 注入 JSON 模式系统指令
+        json_system = (
+            "你必须且只能以合法 JSON 格式回复。"
+            "不要包含任何多余文本、解释、说明或 markdown 标记。"
+            "直接输出 JSON 对象或 JSON 数组。"
         )
+        has_json_instruction = False
+        for m in messages:
+            if m.role == "system" and "json" in m.content.lower():
+                has_json_instruction = True
+                break
+
+        if not has_json_instruction:
+            messages = [
+                Message(role="system", content=json_system),
+                *messages,
+            ]
+
+        # 强制 temperature=0
+        kwargs.setdefault("temperature", 0)
+
+        last_error = ""
+        for attempt in range(max_retries):
+            response = await self.chat(messages, **kwargs)
+
+            if not response.success:
+                last_error = response.error
+                logger.warning(
+                    f"chat_json_strict 第 {attempt + 1}/{max_retries} 次 "
+                    f"调用失败: {response.error}"
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.0)
+                continue
+
+            # 4 策略解析
+            result = self._parse_json_strict(response.content)
+
+            if result is not None:
+                if isinstance(result, list):
+                    result = {"items": result}
+                if not isinstance(result, dict):
+                    last_error = f"解析结果不是 dict/list，而是 {type(result).__name__}"
+                    logger.warning(last_error)
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1.0)
+                    continue
+
+                # 校验必需字段
+                if required_fields:
+                    missing = [f for f in required_fields if f not in result]
+                    if missing:
+                        last_error = f"缺少必需字段: {', '.join(missing)}"
+                        logger.warning(
+                            f"chat_json_strict 第 {attempt + 1}/{max_retries} 次: {last_error}"
+                        )
+                        # 追加提醒后重试
+                        messages = [
+                            *messages,
+                            Message(
+                                role="user",
+                                content=(
+                                    f"你的回复缺少必需字段: {', '.join(missing)}。"
+                                    f"请重新以合法 JSON 格式回复，包含所有必需字段。"
+                                ),
+                            ),
+                        ]
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(1.0)
+                        continue
+
+                return result
+
+            last_error = "所有解析策略均失败"
+            logger.warning(
+                f"chat_json_strict 第 {attempt + 1}/{max_retries} 次: {last_error}"
+            )
+            # 追加提醒后重试
+            messages = [
+                *messages,
+                Message(
+                    role="user",
+                    content="你的回复无法解析为 JSON。请只输出合法的 JSON，不要包含其他文本。",
+                ),
+            ]
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1.0)
+
+        return {"error": f"JSON 解析失败: {last_error}", "raw": response.content if 'response' in dir() else ""}
+
+    # ------------------------------------------------------------------
+    # 原有 JSON 方法 (保留向后兼容)
+    # ------------------------------------------------------------------
 
     async def chat_json(
         self,

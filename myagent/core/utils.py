@@ -188,5 +188,73 @@ def get_shell_command() -> str:
 
 
 def sanitize_filename(name: str) -> str:
-    """清理文件名，移除非法字符"""
-    return re.sub(r'[<>:"/\\|?*]', '_', name).strip()
+    """清理文件名，移除非法字符（含 Unicode 特殊字符）"""
+    if not name:
+        return "unnamed"
+    # 替换 Windows/Mac/Linux 非法字符
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+    # 移除 Unicode 控制字符和特殊空格
+    name = re.sub(r'[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\ufeff]', '', name)
+    # 去除首尾空白和点（Windows 文件名限制）
+    name = name.strip('. ')
+    # 截断到 255 字符（文件系统限制）
+    if len(name) > 255:
+        name = name[:250] + "..."
+    return name or "unnamed"
+
+
+def format_file_size(size_bytes: int) -> str:
+    """格式化文件大小为人类可读格式"""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size_bytes) < 1024:
+            return f"{size_bytes:.1f}{unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f}PB"
+
+
+def chunk_text(text: str, max_chunk_size: int = 4000, overlap: int = 200) -> list:
+    """
+    将长文本分割为块（用于 LLM 上下文管理）。
+
+    按段落边界分割，避免在句子中间断开。
+    """
+    if len(text) <= max_chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = start + max_chunk_size
+
+        if end >= len(text):
+            chunks.append(text[start:])
+            break
+
+        # 尝试在段落/句子边界处分割
+        # 优先找换行符
+        for sep in ["\n\n", "\n", "。", ".", "！", "!", "？", "?", "；", ";", " "]:
+            last_sep = text.rfind(sep, start, end)
+            if last_sep > start + max_chunk_size // 2:
+                end = last_sep + len(sep)
+                break
+
+        chunks.append(text[start:end])
+        start = end - overlap  # 重叠部分确保上下文连续
+
+    return chunks
+
+
+def extract_error_type(error_str: str) -> str:
+    """从错误消息中提取错误类型"""
+    patterns = [
+        r'(\w+Error):',
+        r'(\w+Exception):',
+        r'(\w+Warning):',
+        r'^(\w*Error)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, error_str, re.MULTILINE)
+        if match:
+            return match.group(1)
+    return "UnknownError"

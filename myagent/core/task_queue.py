@@ -6,11 +6,10 @@ core/task_queue.py - 任务队列管理
 from __future__ import annotations
 
 import asyncio
-import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Coroutine, Optional, Dict, List
+from typing import Any, Callable, Coroutine, Optional, Dict, List, Set
 from datetime import datetime
 
 from core.logger import get_logger
@@ -49,6 +48,18 @@ class TaskItem:
     retry_count: int = 0
     max_retries: int = 2
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _done_event: Optional[asyncio.Event] = field(default=None, repr=False)
+
+    def get_done_event(self, loop: asyncio.AbstractEventLoop) -> asyncio.Event:
+        """获取或创建任务完成事件（用于 wait_for_task）"""
+        if self._done_event is None:
+            self._done_event = asyncio.Event()
+        return self._done_event
+
+    def mark_done(self):
+        """标记任务完成，通知等待者"""
+        if self._done_event:
+            self._done_event.set()
 
     def to_dict(self) -> dict:
         return {
@@ -105,9 +116,9 @@ class TaskQueue:
 
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._tasks: Dict[str, TaskItem] = {}
-        self._running_tasks: set = set()
+        self._running_tasks: Set[str] = set()
         self._workers: List[asyncio.Task] = []
-        self._lock = threading.Lock()
+        self._lock: Optional[asyncio.Lock] = None  # 延迟初始化，需在事件循环中
         self._running = False
         self._event_callbacks: List[Callable] = []
 
@@ -120,6 +131,7 @@ class TaskQueue:
         """启动任务队列工作线程"""
         if self._running:
             return
+        self._lock = asyncio.Lock()
         self._running = True
         for i in range(self.max_workers):
             worker = asyncio.create_task(self._worker(f"worker-{i}"))
@@ -207,18 +219,31 @@ class TaskQueue:
         return False
 
     async def wait_for_task(self, task_id: str, timeout: Optional[int] = None) -> Optional[TaskItem]:
-        """等待任务完成"""
-        start = time.time()
-        while True:
-            task = self._tasks.get(task_id)
-            if task and task.status in (
-                TaskStatus.SUCCESS, TaskStatus.FAILED,
-                TaskStatus.TIMEOUT, TaskStatus.CANCELLED,
-            ):
-                return task
-            if timeout and (time.time() - start) > timeout:
-                return self._tasks.get(task_id)
-            await asyncio.sleep(0.1)
+        """等待任务完成（使用 asyncio.Event，无轮询）"""
+        task = self._tasks.get(task_id)
+        if not task:
+            return None
+
+        # 如果已经完成，直接返回
+        if task.status in (
+            TaskStatus.SUCCESS, TaskStatus.FAILED,
+            TaskStatus.TIMEOUT, TaskStatus.CANCELLED,
+        ):
+            return task
+
+        # 使用 asyncio.Event 高效等待
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        done_event = task.get_done_event(loop)
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+
+        return self._tasks.get(task_id)
 
     def get_all_tasks(self) -> List[Dict]:
         """获取所有任务状态"""
@@ -276,54 +301,62 @@ class TaskQueue:
         """执行单个任务(含重试和超时)"""
         task.status = TaskStatus.RUNNING
         task.started_at = timestamp()
+        self._running_tasks.add(task.id)
         self._notify(task, "start")
         logger.info(f"开始执行任务: {task.name} (id={task.id})")
 
-        while task.retry_count <= task.max_retries:
-            try:
-                if asyncio.iscoroutinefunction(task.func):
-                    result = await asyncio.wait_for(
-                        task.func(*task.args, **task.kwargs),
-                        timeout=task.timeout,
-                    )
-                else:
-                    loop = asyncio.get_event_loop()
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: task.func(*task.args, **task.kwargs),
-                        ),
-                        timeout=task.timeout,
-                    )
+        try:
+            while task.retry_count <= task.max_retries:
+                try:
+                    if asyncio.iscoroutinefunction(task.func):
+                        result = await asyncio.wait_for(
+                            task.func(*task.args, **task.kwargs),
+                            timeout=task.timeout,
+                        )
+                    else:
+                        loop = asyncio.get_running_loop()
+                        result = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None,
+                                lambda: task.func(*task.args, **task.kwargs),
+                            ),
+                            timeout=task.timeout,
+                        )
 
-                task.result = result
-                task.status = TaskStatus.SUCCESS
-                self._total_completed += 1
-                self._notify(task, "success")
-                logger.info(f"任务完成: {task.name} (id={task.id})")
-                return
-
-            except asyncio.TimeoutError:
-                task.retry_count += 1
-                if task.retry_count > task.max_retries:
-                    task.status = TaskStatus.TIMEOUT
-                    task.error = f"执行超时 ({task.timeout}s)，已重试 {task.max_retries} 次"
-                    self._total_failed += 1
-                    self._notify(task, "timeout")
-                    logger.error(f"任务超时: {task.name} (id={task.id})")
+                    task.result = result
+                    task.status = TaskStatus.SUCCESS
+                    task.finished_at = timestamp()
+                    self._total_completed += 1
+                    self._notify(task, "success")
+                    logger.info(f"任务完成: {task.name} (id={task.id})")
                     return
-                logger.warning(f"任务超时，重试 {task.retry_count}/{task.max_retries}: {task.name}")
 
-            except Exception as e:
-                task.retry_count += 1
-                task.error = str(e)
-                if task.retry_count > task.max_retries:
-                    task.status = TaskStatus.FAILED
-                    task.error = f"{str(e)} (已重试 {task.max_retries} 次)"
-                    self._total_failed += 1
-                    self._notify(task, "failed")
-                    logger.error(f"任务失败: {task.name} (id={task.id}) - {e}")
-                    return
-                logger.warning(f"任务异常，重试 {task.retry_count}/{task.max_retries}: {task.name} - {e}")
+                except asyncio.TimeoutError:
+                    task.retry_count += 1
+                    if task.retry_count > task.max_retries:
+                        task.status = TaskStatus.TIMEOUT
+                        task.finished_at = timestamp()
+                        task.error = f"执行超时 ({task.timeout}s)，已重试 {task.max_retries} 次"
+                        self._total_failed += 1
+                        self._notify(task, "timeout")
+                        logger.error(f"任务超时: {task.name} (id={task.id})")
+                        return
+                    logger.warning(f"任务超时，重试 {task.retry_count}/{task.max_retries}: {task.name}")
 
-        task.finished_at = timestamp()
+                except Exception as e:
+                    task.retry_count += 1
+                    task.error = str(e)
+                    if task.retry_count > task.max_retries:
+                        task.status = TaskStatus.FAILED
+                        task.finished_at = timestamp()
+                        task.error = f"{str(e)} (已重试 {task.max_retries} 次)"
+                        self._total_failed += 1
+                        self._notify(task, "failed")
+                        logger.error(f"任务失败: {task.name} (id={task.id}) - {e}")
+                        return
+                    logger.warning(f"任务异常，重试 {task.retry_count}/{task.max_retries}: {task.name} - {e}")
+
+        finally:
+            self._running_tasks.discard(task.id)
+            task.finished_at = task.finished_at or timestamp()
+            task.mark_done()
