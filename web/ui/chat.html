@@ -373,6 +373,34 @@ input,textarea,select{font:inherit}
   width:3px;height:24px;background:var(--accent);border-radius:2px 0 0 2px;
 }
 
+/* Agent tree indent */
+.agent-tree-children{margin-left:16px;border-left:1px dashed var(--border-light);padding-left:4px}
+.agent-tree-toggle{
+  width:18px;height:18px;border-radius:3px;
+  display:inline-grid;place-items:center;font-size:10px;
+  color:var(--text3);flex-shrink:0;transition:var(--transition)
+}
+.agent-tree-toggle:hover{background:var(--bg4);color:var(--text)}
+.agent-tree-toggle.expanded{transform:rotate(90deg)}
+
+/* Execution mode badge */
+.exec-badge{
+  font-size:9px;font-weight:600;padding:1px 5px;border-radius:4px;
+  white-space:nowrap;flex-shrink:0;
+}
+.exec-badge.local{background:#dcfce7;color:#166534}
+.exec-badge.sandbox{background:#fef3c7;color:#92400e}
+
+/* Agent add-child button (shows on hover) */
+.agent-add-child-btn{
+  opacity:0;position:absolute;bottom:2px;right:6px;
+  width:20px;height:20px;border-radius:4px;
+  display:grid;place-items:center;font-size:12px;
+  color:var(--text3);transition:var(--transition)
+}
+.agent-card:hover .agent-add-child-btn{opacity:1}
+.agent-add-child-btn:hover{background:var(--accent-light);color:var(--accent)}
+
 .agent-avatar{
   width:38px;height:38px;border-radius:10px;flex-shrink:0;
   display:grid;place-items:center;font-size:16px;font-weight:700;color:#fff;
@@ -525,6 +553,12 @@ input,textarea,select{font:inherit}
 }
 .agent-empty-icon{font-size:40px;margin-bottom:10px;opacity:.4}
 .agent-empty-text{font-size:12px;line-height:1.5}
+
+/* ── Tree node indent per depth ── */
+.agent-tree-node[data-depth="1"]{margin-left:12px}
+.agent-tree-node[data-depth="2"]{margin-left:24px}
+.agent-tree-node[data-depth="3"]{margin-left:36px}
+.agent-tree-node[data-depth="4"]{margin-left:48px}
 </style>
 </head>
 <body>
@@ -666,12 +700,14 @@ const state = {
   isGenerating: false,
   abortController: null,
   systemStatus: null,
-  // ── Agent state ──
-  agents: [],            // [{name, model, description, soul, identity, avatar_color, avatar_emoji}]
+  // ── Agent state (层级体系) ──
+  agentTree: [],         // 树形结构 [{path, name, children: [...], ...}]
+  agentsFlat: [],        // 扁平列表 [{path, name, parent, depth, ...}]
   activeAgent: 'default',
   agentPanelOpen: true,
-  agentSessions: {},     // {agentName: [{id, name, messages, last}]}
-  agentDetails: {},      // {agentName: {soul, identity, model, ...}}
+  agentSessions: {},     // {agentPath: [{id, name, messages, last}]}
+  agentDetails: {},      // {agentPath: {soul, identity, model, ...}}
+  expandedNodes: new Set(['default']),  // 树形展开状态
 };
 
 // ── Utility: deterministic color from agent name ──
@@ -751,155 +787,184 @@ function showStatus() {
 }
 
 // ══════════════════════════════════════════════════════
-// ── Agent Management ──
+// ── Agent Management (层级体系) ──
 // ══════════════════════════════════════════════════════
+
+function flattenTree(nodes, depth, parent) {
+  const result = [];
+  for (const n of nodes) {
+    const flat = Object.assign({}, n, {depth: depth, parent: parent});
+    const children = flat.children || [];
+    result.push(Object.assign({}, flat, {children: undefined}));
+    if (children.length > 0) {
+      result.push.apply(result, flattenTree(children, depth + 1, n.path));
+    }
+  }
+  return result;
+}
+
+function findAgentByPath(path) {
+  return state.agentsFlat.find(function(a) { return a.path === path; });
+}
 
 async function loadAgents() {
   try {
-    const data = await api('/api/agents');
-    state.agents = (data || []).map(a => ({
-      name: a.name || 'default',
-      model: a.model || '',
-      description: a.description || '',
-      soul: a.soul || '',
-      identity: a.identity || '',
-      avatar_color: a.avatar_color || '',
-      avatar_emoji: a.avatar_emoji || '',
-    }));
+    var treeData = await api('/api/agents/tree');
+    state.agentTree = treeData || [];
+    state.agentsFlat = flattenTree(state.agentTree, 0, null);
 
-    // Ensure "default" exists
-    if (!state.agents.find(a => a.name === 'default')) {
-      state.agents.unshift({
-        name: 'default', model: '', description: '默认助手',
-        soul: '', identity: '', avatar_color: '', avatar_emoji: '🤖',
-      });
+    if (!state.agentsFlat.find(function(a) { return a.path === 'default'; })) {
+      var defAgent = {path:'default', name:'default', depth:0, parent:null, description:'默认助手', avatar_emoji:'🤖', execution_mode:'local', avatar_color:getAgentColorClass('default'), session_count:0};
+      state.agentsFlat.unshift(defAgent);
+      state.agentTree.unshift(Object.assign({}, defAgent, {children:[]}));
     }
 
-    // Select default agent if none selected
-    if (!state.activeAgent || !state.agents.find(a => a.name === state.activeAgent)) {
+    for (var i = 0; i < state.agentsFlat.length; i++) {
+      state.expandedNodes.add(state.agentsFlat[i].path);
+    }
+
+    if (!state.activeAgent || !findAgentByPath(state.activeAgent)) {
       state.activeAgent = 'default';
     }
 
-    renderAgentList();
+    renderAgentTree();
     updateActiveAgentBadge();
     await loadSessions();
   } catch (e) {
-    // Offline fallback
-    state.agents = [{
-      name: 'default', model: '', description: '默认助手',
-      soul: '', identity: '', avatar_color: '', avatar_emoji: '🤖',
-    }];
+    var defAgent = {path:'default', name:'default', depth:0, parent:null, description:'默认助手', avatar_emoji:'🤖', execution_mode:'local', avatar_color:getAgentColorClass('default'), session_count:0};
+    state.agentsFlat = [defAgent];
+    state.agentTree = [Object.assign({}, defAgent, {children:[]})];
     state.activeAgent = 'default';
-    renderAgentList();
+    renderAgentTree();
     updateActiveAgentBadge();
     await loadSessions();
   }
 }
 
-async function loadAgentDetails(agentName) {
-  if (state.agentDetails[agentName]) return state.agentDetails[agentName];
+async function loadAgentDetails(agentPath) {
+  if (state.agentDetails[agentPath]) return state.agentDetails[agentPath];
   try {
-    const data = await api(`/api/agents/${encodeURIComponent(agentName)}`);
-    state.agentDetails[agentName] = data || {};
+    var data = await api('/api/agents/' + encodeURIComponent(agentPath));
+    state.agentDetails[agentPath] = data || {};
     return data;
   } catch (e) {
     return {};
   }
 }
 
-function renderAgentList() {
-  const list = document.getElementById('agentList');
-  if (state.agents.length === 0) {
-    list.innerHTML = `
-      <div class="agent-empty">
-        <div class="agent-empty-icon">🤖</div>
-        <div class="agent-empty-text">暂无 Agent<br>点击上方 + 创建</div>
-      </div>`;
+function renderAgentTree() {
+  var list = document.getElementById('agentList');
+  if (state.agentTree.length === 0) {
+    list.innerHTML = '<div class="agent-empty"><div class="agent-empty-icon">🤖</div><div class="agent-empty-text">暂无 Agent<br>点击上方 + 创建</div></div>';
     return;
   }
-
-  list.innerHTML = state.agents.map(a => {
-    const isActive = a.name === state.activeAgent;
-    const initials = getAgentInitials(a.name);
-    const emoji = a.avatar_emoji || '';
-    const avatarContent = emoji || initials;
-    const colorStyle = a.avatar_color ? `background:${a.avatar_color}` : '';
-    const colorClass = a.avatar_color ? '' : getAgentColorClass(a.name);
-    const modelShort = (a.model || '').split('/').pop() || '';
-
-    return `
-      <div class="agent-card ${isActive ? 'active' : ''}"
-           onclick="selectAgent('${escapeHtml(a.name)}')">
-        <div class="agent-avatar ${colorClass}" style="${colorStyle}">
-          ${avatarContent}
-          <span class="status-dot"></span>
-        </div>
-        <div class="agent-info">
-          <div class="agent-name">
-            ${escapeHtml(a.name)}
-            ${modelShort ? `<span class="model-tag">${escapeHtml(modelShort)}</span>` : ''}
-          </div>
-          ${a.description ? `<div class="agent-desc">${escapeHtml(a.description)}</div>` : ''}
-        </div>
-        <button class="agent-settings-btn" onclick="event.stopPropagation();showEditAgentModal('${escapeHtml(a.name)}')" title="Agent 设置">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
-      </div>`;
-  }).join('');
+  list.innerHTML = renderTreeNodes(state.agentTree, 0);
 }
 
-async function selectAgent(agentName) {
-  if (agentName === state.activeAgent) return;
-  state.activeAgent = agentName;
+function renderTreeNodes(nodes, depth) {
+  if (!nodes || nodes.length === 0) return '';
+  var html = '';
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    var isActive = n.path === state.activeAgent;
+    var hasChildren = n.children && n.children.length > 0;
+    var isExpanded = state.expandedNodes.has(n.path);
+    var initials = getAgentInitials(n.name);
+    var emoji = n.avatar_emoji || '';
+    var avatarContent = emoji || initials;
+    var colorStyle = n.avatar_color ? 'background:' + n.avatar_color : '';
+    var colorClass = n.avatar_color ? '' : getAgentColorClass(n.name);
+    var modelShort = (n.model || '').split('/').pop() || '';
+    var execMode = n.execution_mode || 'sandbox';
+    var execLabel = execMode === 'local' ? '本机' : '沙盒';
+    var execClass = execMode === 'local' ? 'local' : 'sandbox';
+    var avatarSize = depth > 0 ? 'width:32px;height:32px;font-size:13px' : '';
+    var dotSize = depth > 0 ? 'width:9px;height:9px' : '';
+
+    html += '<div class="agent-tree-node" data-depth="' + depth + '" data-path="' + escapeHtml(n.path) + '">';
+    html += '<div class="agent-card ' + (isActive ? 'active' : '') + '" onclick="selectAgent(\'' + escapeHtml(n.path) + '\')">';
+    if (hasChildren) {
+      html += '<button class="agent-tree-toggle ' + (isExpanded ? 'expanded' : '') + '" onclick="event.stopPropagation();toggleTreeNode(\'' + escapeHtml(n.path) + '\')" title="展开/折叠">▶</button>';
+    } else {
+      html += '<span style="width:18px;flex-shrink:0"></span>';
+    }
+    html += '<div class="agent-avatar ' + colorClass + '" style="' + colorStyle + avatarSize + '">' + avatarContent + '<span class="status-dot" style="' + dotSize + '"></span></div>';
+    html += '<div class="agent-info"><div class="agent-name">' + escapeHtml(n.name);
+    if (modelShort) html += '<span class="model-tag">' + escapeHtml(modelShort) + '</span>';
+    html += '<span class="exec-badge ' + execClass + '" title="执行模式: ' + execLabel + '">' + execLabel + '</span>';
+    html += '</div>';
+    if (n.description) html += '<div class="agent-desc">' + escapeHtml(n.description) + '</div>';
+    html += '</div>';
+    html += '<button class="agent-settings-btn" onclick="event.stopPropagation();showEditAgentModal(\'' + escapeHtml(n.path) + '\')" title="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button>';
+    html += '<button class="agent-add-child-btn" onclick="event.stopPropagation();showCreateChildModal(\'' + escapeHtml(n.path) + '\')" title="添加子 Agent">+</button>';
+    html += '</div>';
+    if (hasChildren && isExpanded) {
+      html += '<div class="agent-tree-children">' + renderTreeNodes(n.children, depth + 1) + '</div>';
+    }
+    html += '</div>';
+  }
+  return html;
+}
+
+function toggleTreeNode(path) {
+  if (state.expandedNodes.has(path)) {
+    state.expandedNodes.delete(path);
+  } else {
+    state.expandedNodes.add(path);
+  }
+  renderAgentTree();
+}
+
+async function selectAgent(agentPath) {
+  if (agentPath === state.activeAgent) return;
+  state.activeAgent = agentPath;
   state.activeSessionId = null;
   state.messages = [];
-
-  // Update UI
-  renderAgentList();
+  var parts = agentPath.split('/');
+  var cumPath = '';
+  for (var i = 0; i < parts.length; i++) {
+    cumPath = cumPath ? cumPath + '/' + parts[i] : parts[i];
+    state.expandedNodes.add(cumPath);
+  }
+  renderAgentTree();
   updateActiveAgentBadge();
-
-  // Load sessions for this agent
   await loadSessions();
-
-  // Load agent details and update welcome card
-  const details = await loadAgentDetails(agentName);
-  updateWelcomeCard(agentName, details);
-
-  // Show welcome
+  var details = await loadAgentDetails(agentPath);
+  updateWelcomeCard(agentPath, details);
   document.getElementById('headerTitle').textContent = '新对话';
   renderMessages();
   document.getElementById('userInput').focus();
 }
 
 function updateActiveAgentBadge() {
-  const badge = document.getElementById('activeAgentBadge');
-  const avatar = document.getElementById('badgeAvatar');
-  const name = document.getElementById('badgeName');
-  const agent = state.agents.find(a => a.name === state.activeAgent);
-
+  var badge = document.getElementById('activeAgentBadge');
+  var avatar = document.getElementById('badgeAvatar');
+  var nameEl = document.getElementById('badgeName');
+  var agent = findAgentByPath(state.activeAgent);
   if (agent) {
-    const emoji = agent.avatar_emoji || '';
+    var emoji = agent.avatar_emoji || '';
     avatar.textContent = emoji || getAgentInitials(agent.name);
     avatar.style.background = agent.avatar_color || getAgentGradient(agent.name);
     avatar.style.borderRadius = '50%';
-    name.textContent = agent.name;
+    nameEl.textContent = agent.path;
     badge.style.display = 'inline-flex';
   } else {
     badge.style.display = 'none';
   }
 }
 
-function updateWelcomeCard(agentName, details) {
-  const agent = state.agents.find(a => a.name === agentName);
-  const emojiEl = document.getElementById('welcomeEmoji');
-  const titleEl = document.getElementById('welcomeTitle');
-  const subEl = document.getElementById('welcomeSubtitle');
-
+function updateWelcomeCard(agentPath, details) {
+  var agent = findAgentByPath(agentPath);
+  var emojiEl = document.getElementById('welcomeEmoji');
+  var titleEl = document.getElementById('welcomeTitle');
+  var subEl = document.getElementById('welcomeSubtitle');
   if (agent) {
     emojiEl.textContent = agent.avatar_emoji || '👋';
-    titleEl.textContent = `你好，我是 ${agent.name}`;
-    const desc = agent.description || details?.identity || '你的 AI 助手';
-    subEl.textContent = desc;
+    var execMode = agent.execution_mode || 'sandbox';
+    var execLabel = execMode === 'local' ? '🖥️ 本机模式' : '📦 沙盒模式';
+    titleEl.textContent = '你好，我是 ' + agent.path;
+    var desc = agent.description || (details && details.identity) || '你的 AI 助手';
+    subEl.textContent = desc + ' (' + execLabel + ')';
   }
 }
 
@@ -913,87 +978,82 @@ function toggleAgentPanel() {
 
 // ── Agent Create/Edit Modal ──
 function showCreateAgentModal() {
-  showAgentModal(null);
+  showAgentModal(null, null);
 }
 
-async function showEditAgentModal(agentName) {
-  const details = await loadAgentDetails(agentName);
-  const agent = state.agents.find(a => a.name === agentName);
-  showAgentModal(agentName, { ...agent, ...details });
+function showCreateChildModal(parentPath) {
+  showAgentModal(null, parentPath);
 }
 
-function showAgentModal(editName, data = {}) {
-  const isEdit = !!editName;
-  const name = data.name || '';
-  const model = data.model || '';
-  const description = data.description || '';
-  const soul = data.soul || '';
-  const identity = data.identity || '';
-  const avatar_emoji = data.avatar_emoji || '';
+async function showEditAgentModal(agentPath) {
+  var details = await loadAgentDetails(agentPath);
+  var agent = findAgentByPath(agentPath);
+  var merged = agent ? Object.assign({}, agent, details) : details;
+  showAgentModal(agentPath, null, merged);
+}
 
-  const emojis = ['🤖','🧠','💡','🎯','🔮','⚡','🌟','🎨','📝','🔧','🎭','🌐','🦊','🐱','🐶','🦁'];
+function showAgentModal(editPath, parentPath, data) {
+  data = data || {};
+  var isEdit = !!editPath;
+  var isChild = !!parentPath && !isEdit;
+  var path = data.path || editPath || '';
+  var name = data.name || '';
+  var model = data.model || '';
+  var description = data.description || '';
+  var soul = data.soul || '';
+  var identity = data.identity || '';
+  var avatar_emoji = data.avatar_emoji || '';
+  var execution_mode = data.execution_mode || (isEdit ? 'sandbox' : (parentPath ? 'sandbox' : 'local'));
 
-  const container = document.getElementById('agentModalContainer');
-  container.innerHTML = `
-    <div class="modal-overlay" onclick="if(event.target===this)closeAgentModal()">
-      <div class="agent-modal">
-        <h3>${isEdit ? '⚙️ 编辑 Agent' : '✨ 创建新 Agent'}</h3>
-        <p class="modal-subtitle">${isEdit ? `修改 ${escapeHtml(editName)} 的配置` : '配置一个新的 AI Agent'}</p>
+  var emojis = ['🤖','🧠','💡','🎯','🔮','⚡','🌟','🎨','📝','🔧','🎭','🌐','🦊','🐱','🐶','🦁'];
+  var title = isEdit ? '⚙️ 编辑 Agent' : (isChild ? '👶 创建子 Agent (' + escapeHtml(parentPath) + ')' : '✨ 创建新 Agent');
+  var subtitle = isEdit ? '修改 ' + escapeHtml(editPath) + ' 的配置' : (isChild ? '在 ' + escapeHtml(parentPath) + ' 下创建子 Agent' : '配置一个新的顶级 AI Agent');
 
-        <div class="agent-form-group">
-          <label>名称 *</label>
-          <input type="text" id="agentFormName" placeholder="例如: translator, coder, tutor" value="${escapeHtml(name)}" ${isEdit ? 'readonly style="opacity:.6;cursor:not-allowed"' : ''}>
-          <div class="hint">${isEdit ? '名称不可修改' : '使用英文小写，可用连字符'}</div>
-        </div>
-
-        <div class="agent-form-group">
-          <label>模型</label>
-          <input type="text" id="agentFormModel" placeholder="例如: openai/gpt-4o, anthropic/claude-3.5-sonnet" value="${escapeHtml(model)}">
-          <div class="hint">留空则使用系统默认模型</div>
-        </div>
-
-        <div class="agent-form-group">
-          <label>头像</label>
-          <div class="agent-avatar-picker" id="avatarPicker">
-            ${emojis.map(e => `
-              <div class="agent-avatar-option ${avatar_emoji === e ? 'selected' : ''}"
-                   onclick="pickAvatar(this,'${e}')" data-emoji="${e}">${e}</div>
-            `).join('')}
-          </div>
-          <input type="hidden" id="agentFormEmoji" value="${escapeHtml(avatar_emoji)}">
-        </div>
-
-        <div class="agent-form-group">
-          <label>简介</label>
-          <input type="text" id="agentFormDesc" placeholder="简短描述这个 Agent 的用途" value="${escapeHtml(description)}" maxlength="100">
-          <div class="hint">一句话描述，最多 100 字</div>
-        </div>
-
-        <div class="agent-form-group">
-          <label>Identity (身份)</label>
-          <textarea id="agentFormIdentity" placeholder="你是一个... 你擅长... 你的风格是..." rows="3">${escapeHtml(identity)}</textarea>
-          <div class="hint">定义 Agent 的身份和角色</div>
-        </div>
-
-        <div class="agent-form-group">
-          <label>Soul (灵魂/人格)</label>
-          <textarea id="agentFormSoul" placeholder="核心指令、行为准则、约束..." rows="4">${escapeHtml(soul)}</textarea>
-          <div class="hint">深层人格定义，影响 Agent 的思维方式</div>
-        </div>
-
-        <div class="agent-modal-actions">
-          ${isEdit ? `<button class="agent-modal-btn agent-modal-btn-delete" onclick="deleteAgent('${escapeHtml(editName)}')">🗑️ 删除</button>` : ''}
-          <button class="agent-modal-btn agent-modal-btn-cancel" onclick="closeAgentModal()">取消</button>
-          <button class="agent-modal-btn agent-modal-btn-primary" onclick="saveAgent('${escapeHtml(editName || '')}')">
-            ${isEdit ? '保存修改' : '创建 Agent'}
-          </button>
-        </div>
-      </div>
-    </div>`;
+  var container = document.getElementById('agentModalContainer');
+  container.innerHTML = '<div class="modal-overlay" onclick="if(event.target===this)closeAgentModal()"><div class="agent-modal">'
+    + '<h3>' + title + '</h3>'
+    + '<p class="modal-subtitle">' + subtitle + '</p>'
+    + '<div class="agent-form-group"><label>名称 *</label>'
+    + '<input type="text" id="agentFormName" placeholder="例如: translator, coder, tutor" value="' + escapeHtml(name) + '" ' + (isEdit ? 'readonly style="opacity:.6;cursor:not-allowed"' : '') + '>'
+    + '<div class="hint">' + (isEdit ? '名称不可修改' : '使用英文小写，可用连字符') + '</div></div>'
+    + '<div class="agent-form-group"><label>模型</label>'
+    + '<input type="text" id="agentFormModel" placeholder="例如: openai/gpt-4o, anthropic/claude-3.5-sonnet" value="' + escapeHtml(model) + '">'
+    + '<div class="hint">留空则使用系统默认模型</div></div>'
+    + '<div class="agent-form-group"><label>头像</label>'
+    + '<div class="agent-avatar-picker" id="avatarPicker">'
+    + emojis.map(function(e) { return '<div class="agent-avatar-option ' + (avatar_emoji === e ? 'selected' : '') + '" onclick="pickAvatar(this,\'' + e + '\')" data-emoji="' + e + '">' + e + '</div>'; }).join('')
+    + '</div><input type="hidden" id="agentFormEmoji" value="' + escapeHtml(avatar_emoji) + '"></div>'
+    + '<div class="agent-form-group"><label>简介</label>'
+    + '<input type="text" id="agentFormDesc" placeholder="简短描述这个 Agent 的用途" value="' + escapeHtml(description) + '" maxlength="100">'
+    + '<div class="hint">一句话描述，最多 100 字</div></div>'
+    + '<div class="agent-form-group"><label>执行模式</label>'
+    + '<select id="agentFormExecMode">'
+    + '<option value="local"' + (execution_mode === 'local' ? ' selected' : '') + '>🖥️ 本机执行 (无隔离，功能完整)</option>'
+    + '<option value="sandbox"' + (execution_mode === 'sandbox' ? ' selected' : '') + '>📦 沙盒执行 (Docker 隔离，更安全)</option>'
+    + '</select>'
+    + '<div class="hint">默认 Agent 为本机模式，其他默认沙盒模式</div></div>'
+    + '<div class="agent-form-group"><label>Identity (身份)</label>'
+    + '<textarea id="agentFormIdentity" placeholder="你是一个... 你擅长... 你的风格是..." rows="3">' + escapeHtml(identity) + '</textarea>'
+    + '<div class="hint">定义 Agent 的身份和角色</div></div>'
+    + '<div class="agent-form-group"><label>Soul (灵魂/人格)</label>'
+    + '<textarea id="agentFormSoul" placeholder="核心指令、行为准则、约束..." rows="4">' + escapeHtml(soul) + '</textarea>'
+    + '<div class="hint">深层人格定义，影响 Agent 的思维方式</div></div>'
+    + '<div class="agent-modal-actions">'
+    + (isEdit ? '<button class="agent-modal-btn agent-modal-btn-delete" onclick="deleteAgent(\'' + escapeHtml(editPath) + '\')">🗑️ 删除</button>' : '')
+    + '<button class="agent-modal-btn agent-modal-btn-cancel" onclick="closeAgentModal()">取消</button>'
+    + '<button class="agent-modal-btn agent-modal-btn-primary" onclick="saveAgentModal(\'' + escapeHtml(editPath || '') + '\',\'' + escapeHtml(parentPath || '') + '\')">'
+    + (isEdit ? '保存修改' : (isChild ? '创建子 Agent' : '创建 Agent'))
+    + '</button></div></div></div>';
+  // Store context in hidden field
+  var hidden = document.createElement('input');
+  hidden.type = 'hidden';
+  hidden.id = 'agentFormContext';
+  hidden.value = JSON.stringify({editPath: editPath || '', parentPath: parentPath || '', isEdit: isEdit, isChild: isChild});
+  container.querySelector('.agent-modal').appendChild(hidden);
 }
 
 function pickAvatar(el, emoji) {
-  document.querySelectorAll('.agent-avatar-option').forEach(e => e.classList.remove('selected'));
+  document.querySelectorAll('.agent-avatar-option').forEach(function(e) { e.classList.remove('selected'); });
   el.classList.add('selected');
   document.getElementById('agentFormEmoji').value = emoji;
 }
@@ -1002,36 +1062,47 @@ function closeAgentModal() {
   document.getElementById('agentModalContainer').innerHTML = '';
 }
 
-async function saveAgent(editName) {
-  const nameEl = document.getElementById('agentFormName');
-  const modelEl = document.getElementById('agentFormModel');
-  const descEl = document.getElementById('agentFormDesc');
-  const identityEl = document.getElementById('agentFormIdentity');
-  const soulEl = document.getElementById('agentFormSoul');
-  const emojiEl = document.getElementById('agentFormEmoji');
+async function saveAgentModal(editPath, parentPath) {
+  var ctxEl = document.getElementById('agentFormContext');
+  var ctx = ctxEl ? JSON.parse(ctxEl.value) : {};
+  var isEdit = ctx.isEdit;
+  var isChild = ctx.isChild;
 
-  const isEdit = !!editName;
-  const name = isEdit ? editName : nameEl.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  var nameEl = document.getElementById('agentFormName');
+  var modelEl = document.getElementById('agentFormModel');
+  var descEl = document.getElementById('agentFormDesc');
+  var identityEl = document.getElementById('agentFormIdentity');
+  var soulEl = document.getElementById('agentFormSoul');
+  var emojiEl = document.getElementById('agentFormEmoji');
+  var execEl = document.getElementById('agentFormExecMode');
 
+  var name = nameEl.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
   if (!name) { toast('请输入有效的 Agent 名称', 'error'); return; }
   if (!isEdit && name.length < 2) { toast('名称至少 2 个字符', 'error'); return; }
 
-  const payload = {
-    name,
+  var payload = {
+    name: name,
     model: modelEl.value.trim(),
     description: descEl.value.trim(),
     identity: identityEl.value.trim(),
     soul: soulEl.value.trim(),
     avatar_emoji: emojiEl.value,
+    execution_mode: execEl.value,
   };
 
   try {
     if (isEdit) {
-      await api(`/api/agents/${encodeURIComponent(name)}`, {
+      await api('/api/agents/' + encodeURIComponent(editPath), {
         method: 'PUT',
         body: JSON.stringify(payload),
       });
       toast('Agent 已更新', 'success');
+    } else if (isChild) {
+      var resp = await api('/api/agents/' + encodeURIComponent(parentPath) + '/children', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      toast('子 Agent 已创建: ' + (resp.path || name), 'success');
     } else {
       await api('/api/agents', {
         method: 'POST',
@@ -1046,14 +1117,14 @@ async function saveAgent(editName) {
   }
 }
 
-async function deleteAgent(agentName) {
-  if (agentName === 'default') { toast('不能删除默认 Agent', 'error'); return; }
-  if (!confirm(`确定删除 Agent "${agentName}"？`)) return;
+async function deleteAgent(agentPath) {
+  if (agentPath === 'default') { toast('不能删除默认 Agent', 'error'); return; }
+  if (!confirm('确定删除 Agent "' + agentPath + '" 及其所有子 Agent？')) return;
   try {
-    await api(`/api/agents/${encodeURIComponent(agentName)}`, { method: 'DELETE' });
+    await api('/api/agents/' + encodeURIComponent(agentPath), { method: 'DELETE' });
     toast('Agent 已删除', 'success');
     closeAgentModal();
-    if (state.activeAgent === agentName) {
+    if (state.activeAgent === agentPath || state.activeAgent.startsWith(agentPath + '/')) {
       state.activeAgent = 'default';
     }
     await loadAgents();
@@ -1133,7 +1204,7 @@ function newChat() {
   state.activeSessionId = '__new__';
   state.messages = [];
   document.getElementById('headerTitle').textContent = '新对话';
-  const agent = state.agents.find(a => a.name === state.activeAgent);
+  const agent = findAgentByPath(state.activeAgent);
   if (agent) {
     document.getElementById('welcomeEmoji').textContent = agent.avatar_emoji || '👋';
     document.getElementById('welcomeTitle').textContent = `你好，我是 ${agent.name}`;
@@ -1198,7 +1269,7 @@ function renderMessages() {
   const container = document.getElementById('messagesInner');
   if (state.messages.length === 0) {
     // Show welcome card
-    const agent = state.agents.find(a => a.name === state.activeAgent);
+    const agent = findAgentByPath(state.activeAgent);
     container.innerHTML = `
       <div class="welcome-card" id="welcomeCard">
         <h2><span class="emoji" id="welcomeEmoji">${agent ? (agent.avatar_emoji || '👋') : '👋'}</span>
@@ -1219,7 +1290,7 @@ function renderMessages() {
   const welcomeCard = document.getElementById('welcomeCard');
   if (welcomeCard) welcomeCard.style.display = 'none';
 
-  const agent = state.agents.find(a => a.name === state.activeAgent);
+  const agent = findAgentByPath(state.activeAgent);
   const botEmoji = agent ? (agent.avatar_emoji || '🤖') : '🤖';
 
   let html = '';
@@ -1335,6 +1406,7 @@ async function sendMessage() {
         message: text,
         session_id: sessionId,
         agent_name: state.activeAgent,
+        agent_path: state.activeAgent,
       }),
       signal: state.abortController.signal,
     });
@@ -1389,7 +1461,7 @@ function stopGenerating() {
 
 function showTypingIndicator() {
   const container = document.getElementById('messagesInner');
-  const agent = state.agents.find(a => a.name === state.activeAgent);
+  const agent = findAgentByPath(state.activeAgent);
   const botEmoji = agent ? (agent.avatar_emoji || '🤖') : '🤖';
   const el = document.createElement('div');
   el.className = 'typing-indicator';

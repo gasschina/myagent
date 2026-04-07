@@ -33,16 +33,20 @@ class ApiServer:
         r.add_get("/api/status", self.handle_status)
         r.add_post("/api/shutdown", self.handle_shutdown)
         r.add_get("/api/agents", self.handle_list_agents)
+        r.add_get("/api/agents/tree", self.handle_agents_tree)
         r.add_post("/api/agents", self.handle_create_agent)
-        r.add_get("/api/agents/{name}", self.handle_get_agent)
-        r.add_put("/api/agents/{name}", self.handle_update_agent)
-        r.add_delete("/api/agents/{name}", self.handle_delete_agent)
-        r.add_get("/api/agents/{name}/soul", self.handle_get_soul)
-        r.add_put("/api/agents/{name}/soul", self.handle_set_soul)
-        r.add_get("/api/agents/{name}/identity", self.handle_get_identity)
-        r.add_put("/api/agents/{name}/identity", self.handle_set_identity)
-        r.add_get("/api/agents/{name}/user", self.handle_get_user)
-        r.add_put("/api/agents/{name}/user", self.handle_set_user)
+        r.add_get("/api/agents/{name:[a-zA-Z0-9_/-]+}", self.handle_get_agent)
+        r.add_put("/api/agents/{name:[a-zA-Z0-9_/-]+}", self.handle_update_agent)
+        r.add_delete("/api/agents/{name:[a-zA-Z0-9_/-]+}", self.handle_delete_agent)
+        r.add_get("/api/agents/{name:[a-zA-Z0-9_/-]+}/soul", self.handle_get_soul)
+        r.add_put("/api/agents/{name:[a-zA-Z0-9_/-]+}/soul", self.handle_set_soul)
+        r.add_get("/api/agents/{name:[a-zA-Z0-9_/-]+}/identity", self.handle_get_identity)
+        r.add_put("/api/agents/{name:[a-zA-Z0-9_/-]+}/identity", self.handle_set_identity)
+        r.add_get("/api/agents/{name:[a-zA-Z0-9_/-]+}/user", self.handle_get_user)
+        r.add_put("/api/agents/{name:[a-zA-Z0-9_/-]+}/user", self.handle_set_user)
+        r.add_get("/api/agents/{name:[a-zA-Z0-9_/-]+}/sessions", self.handle_agent_sessions)
+        r.add_get("/api/agents/{name:[a-zA-Z0-9_/-]+}/children", self.handle_list_children)
+        r.add_post("/api/agents/{name:[a-zA-Z0-9_/-]+}/children", self.handle_create_child)
         r.add_get("/api/platforms", self.handle_list_platforms)
         r.add_put("/api/platforms/{name}", self.handle_update_platform)
         r.add_get("/api/sessions", self.handle_list_sessions)
@@ -66,7 +70,6 @@ class ApiServer:
         r.add_get("/api/workdir/files", self.handle_list_workdir)
         r.add_get("/api/logs", self.handle_get_logs)
         r.add_get("/api/logs/stream", self.handle_log_stream)
-        r.add_get("/api/agents/{name}/sessions", self.handle_agent_sessions)
         r.add_post("/api/chat", self.handle_chat)
         r.add_get("/chat", self.handle_chat_page)
         ui_dir = Path(__file__).parent / "ui"
@@ -90,8 +93,10 @@ class ApiServer:
             return web.json_response({"error": "message is required"}, status=400)
 
         agent_name = data.get("agent_name", "default") or "default"
+        # 支持 path 格式 (如 "coder/python-expert")
+        agent_path = data.get("agent_path", agent_name)
         raw_session_id = data.get("session_id", "") or "web_default"
-        session_id = f"{agent_name}_{raw_session_id}"
+        session_id = f"{agent_path}_{raw_session_id}"
 
         try:
             response = await self.core.process_message(message, session_id)
@@ -108,7 +113,7 @@ class ApiServer:
                     session_id=session_id, category="short_term",
                 ))
 
-            return web.json_response({"response": response, "session_id": session_id, "agent_name": agent_name})
+            return web.json_response({"response": response, "session_id": session_id, "agent_name": agent_path, "agent_path": agent_path})
         except Exception as e:
             logger.error(f"Chat error: {e}", exc_info=True)
             return web.json_response({"error": str(e)}, status=500)
@@ -133,49 +138,161 @@ class ApiServer:
         asyncio.create_task(self.core.shutdown())
         return web.json_response({"ok": True})
 
-    # --- Agents ---
+    # --- Agents (层级体系) ---
+    # 目录结构: agents/default/{config.json, soul.md, ...}
+    #           agents/coder/{config.json, soul.md, ...}
+    #           agents/coder/python-expert/{config.json, soul.md, ...}
+    # agent path = 相对于 agents/ 的路径, 如 "default", "coder", "coder/python-expert"
+
     def _agents_dir(self):
         d = self.core.config_mgr.data_dir / "agents"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _agent_dir(self, name):
-        return self._agents_dir() / name
+    def _agent_dir(self, path: str) -> Path:
+        """根据 agent path 返回目录 (path 如 'coder/python-expert')"""
+        return self._agents_dir() / path
+
+    def _ensure_default_agent(self):
+        """确保默认 agent 存在"""
+        ad = self._agent_dir("default")
+        if not (ad / "config.json").exists():
+            ad.mkdir(parents=True, exist_ok=True)
+            cfg = {
+                "name": "default",
+                "description": "默认助手 - 本机运行模式",
+                "avatar_color": _agent_color("default"),
+                "avatar_emoji": "🤖",
+                "execution_mode": "local",
+                "enabled": True,
+                "system_prompt": "你是 MyAgent 默认助手，运行在本机模式。请用友好、专业的方式回答用户的问题。",
+            }
+            (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+            for fn, default in [
+                ("soul.md", "# Default Agent\n\n## 性格\n专业、友好的AI助手\n"),
+                ("identity.md", "# Default Agent\n\n## 身份\nMyAgent 默认AI助手\n"),
+                ("user.md", "# 用户信息\n\n## 用户偏好\n<!-- 在此处记录用户偏好 -->\n"),
+            ]:
+                if not (ad / fn).exists():
+                    (ad / fn).write_text(default)
+            logger.info("已创建默认 Agent")
+
+    def _read_agent_config(self, path: str) -> dict | None:
+        """读取 agent 配置"""
+        cfg_file = self._agent_dir(path) / "config.json"
+        if not cfg_file.exists():
+            return None
+        return json.loads(cfg_file.read_text())
+
+    def _write_agent_config(self, path: str, cfg: dict):
+        """写入 agent 配置"""
+        ad = self._agent_dir(path)
+        ad.mkdir(parents=True, exist_ok=True)
+        (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+
+    def _scan_agents_flat(self, base_dir: Path = None, prefix: str = "") -> list[dict]:
+        """递归扫描所有 agent，返回扁平列表"""
+        if base_dir is None:
+            base_dir = self._agents_dir()
+        agents = []
+        if not base_dir.exists():
+            return agents
+        for d in sorted(base_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            cfg_file = d / "config.json"
+            if not cfg_file.exists():
+                continue
+            agent_path = f"{prefix}{d.name}" if not prefix else f"{prefix}/{d.name}"
+            cfg = json.loads(cfg_file.read_text())
+            agent = {"path": agent_path, "name": d.name, **cfg}
+            agent["avatar_color"] = cfg.get("avatar_color") or _agent_color(d.name)
+            agent["depth"] = agent_path.count("/")
+            agents.append(agent)
+            # 递归子目录
+            agents.extend(self._scan_agents_flat(d, agent_path))
+        return agents
+
+    def _build_agent_tree(self, agents_flat: list[dict]) -> list[dict]:
+        """将扁平 agent 列表构建为树结构"""
+        # 按 path 索引
+        by_path = {a["path"]: {**a, "children": []} for a in agents_flat}
+        roots = []
+        for a in agents_flat:
+            path = a["path"]
+            parent_path = "/".join(path.split("/")[:-1]) if "/" in path else None
+            node = by_path[path]
+            if parent_path and parent_path in by_path:
+                by_path[parent_path]["children"].append(node)
+            else:
+                roots.append(node)
+        return roots
 
     async def handle_list_agents(self, request):
-        if not self.core.memory:
-            session_counts = {}
-        else:
+        """GET /api/agents - 返回扁平 agent 列表"""
+        self._ensure_default_agent()
+        agents = self._scan_agents_flat()
+        # 统计会话数
+        if self.core.memory:
             rows = self.core.memory._get_conn().execute(
                 "SELECT session_id, COUNT(*) as cnt FROM memories "
                 "WHERE category='short_term' GROUP BY session_id").fetchall()
             session_counts = {}
             for r in rows:
                 sid = r["session_id"]
-                agent_part = sid.split("_")[0] if "_" in sid else "default"
-                session_counts[agent_part] = session_counts.get(agent_part, 0) + r["cnt"]
-        agents = []
-        for d in sorted(self._agents_dir().iterdir()):
-            if d.is_dir() and (d / "config.json").exists():
-                cfg = json.loads((d / "config.json").read_text())
-                agent = {"name": d.name, **cfg}
-                agent["avatar_color"] = cfg.get("avatar_color") or _agent_color(d.name)
-                agent["session_count"] = session_counts.get(d.name, 0)
-                agents.append(agent)
-        if not agents:
-            default_agent = {"name": "default", "model": self.core.config.llm.model,
-                            "avatar_color": _agent_color("default"), "session_count": session_counts.get("default", 0)}
-            agents.append(default_agent)
+                for ap in [sid.split("_")[0], sid]:
+                    session_counts[ap] = session_counts.get(ap, 0) + r["cnt"]
+            for a in agents:
+                a["session_count"] = session_counts.get(a["path"], 0)
         return web.json_response(agents)
 
+    async def handle_agents_tree(self, request):
+        """GET /api/agents/tree - 返回树形结构"""
+        self._ensure_default_agent()
+        agents_flat = self._scan_agents_flat()
+        # 统计会话数
+        if self.core.memory:
+            rows = self.core.memory._get_conn().execute(
+                "SELECT session_id, COUNT(*) as cnt FROM memories "
+                "WHERE category='short_term' GROUP BY session_id").fetchall()
+            session_counts = {}
+            for r in rows:
+                sid = r["session_id"]
+                for ap in [sid.split("_")[0], sid]:
+                    session_counts[ap] = session_counts.get(ap, 0) + r["cnt"]
+            for a in agents_flat:
+                a["session_count"] = session_counts.get(a["path"], 0)
+        tree = self._build_agent_tree(agents_flat)
+        return web.json_response(tree)
+
     async def handle_create_agent(self, request):
+        """POST /api/agents - 创建顶级 agent"""
+        self._ensure_default_agent()
         data = await request.json()
-        name = data.get("name", f"agent_{int(time.time())}")
-        ad = self._agent_dir(name); ad.mkdir(parents=True, exist_ok=True)
-        cfg = {k: v for k, v in data.items() if k not in ("name", "system_prompt")}
-        cfg.setdefault("avatar_color", _agent_color(name))
-        system_prompt = data.get("system_prompt", f"你是{name}，一个专业的AI助手。请用友好、专业的方式回答用户的问题。")
-        cfg.setdefault("system_prompt", system_prompt)
+        name = data.get("name", "").strip()
+        if not name:
+            name = f"agent_{int(time.time())}"
+        # 安全校验
+        if "/" in name or "\\" in name or name == "default":
+            return web.json_response({"error": "invalid name (no slashes, cannot be 'default')"}, status=400)
+
+        ad = self._agent_dir(name)
+        if (ad / "config.json").exists():
+            return web.json_response({"error": f"Agent '{name}' already exists"}, status=409)
+
+        cfg = {
+            "name": name,
+            "description": data.get("description", ""),
+            "avatar_color": data.get("avatar_color") or _agent_color(name),
+            "avatar_emoji": data.get("avatar_emoji", ""),
+            "execution_mode": data.get("execution_mode", "sandbox"),
+            "enabled": True,
+            "system_prompt": data.get("system_prompt") or data.get("soul") or f"你是{name}，一个专业的AI助手。",
+        }
+        if "model" in data:
+            cfg["model"] = data["model"]
+
+        ad.mkdir(parents=True, exist_ok=True)
         (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
         for fn, default in [
             ("soul.md", f"# {name}\n\n## 性格\n专业AI助手\n"),
@@ -184,35 +301,131 @@ class ApiServer:
         ]:
             if not (ad / fn).exists():
                 (ad / fn).write_text(default)
-        return web.json_response({"ok": True, "name": name, "avatar_color": cfg["avatar_color"]})
+
+        logger.info(f"创建 Agent: {name} (sandbox模式)")
+        return web.json_response({"ok": True, "path": name, "name": name, "avatar_color": cfg["avatar_color"]})
+
+    async def handle_create_child(self, request):
+        """POST /api/agents/{parent}/children - 创建子 agent"""
+        parent_path = request.match_info["name"]
+        self._ensure_default_agent()
+
+        parent_cfg = self._read_agent_config(parent_path)
+        if not parent_cfg:
+            return web.json_response({"error": f"Parent agent '{parent_path}' not found"}, status=404)
+
+        data = await request.json()
+        name = data.get("name", "").strip()
+        if not name:
+            name = f"agent_{int(time.time())}"
+        if "/" in name or "\\" in name:
+            return web.json_response({"error": "invalid name (no slashes)"}, status=400)
+
+        child_path = f"{parent_path}/{name}"
+        ad = self._agent_dir(child_path)
+        if (ad / "config.json").exists():
+            return web.json_response({"error": f"Agent '{child_path}' already exists"}, status=409)
+
+        cfg = {
+            "name": name,
+            "parent": parent_path,
+            "description": data.get("description", ""),
+            "avatar_color": data.get("avatar_color") or _agent_color(name),
+            "avatar_emoji": data.get("avatar_emoji", ""),
+            "execution_mode": data.get("execution_mode", "sandbox"),
+            "enabled": True,
+            "system_prompt": data.get("system_prompt") or data.get("soul") or f"你是{name}，{parent_path}的子Agent。请用专业的方式完成你的任务。",
+        }
+        if "model" in data:
+            cfg["model"] = data["model"]
+
+        ad.mkdir(parents=True, exist_ok=True)
+        (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+        for fn, default in [
+            ("soul.md", f"# {name}\n\n## 上级: {parent_path}\n## 性格\n专业AI助手\n"),
+            ("identity.md", f"# {name}\n\n## 身份\n{parent_path} 的子 Agent\n"),
+            ("user.md", f"# {name} 用户信息\n\n## 用户偏好\n<!-- 在此处记录用户偏好 -->\n"),
+        ]:
+            if not (ad / fn).exists():
+                (ad / fn).write_text(default)
+
+        logger.info(f"创建子 Agent: {child_path} (sandbox模式)")
+        return web.json_response({"ok": True, "path": child_path, "name": name, "parent": parent_path, "avatar_color": cfg["avatar_color"]})
+
+    async def handle_list_children(self, request):
+        """GET /api/agents/{parent}/children - 列出子 agent"""
+        parent_path = request.match_info["name"]
+        parent_dir = self._agent_dir(parent_path)
+        if not (parent_dir / "config.json").exists():
+            return web.json_response({"error": f"Agent '{parent_path}' not found"}, status=404)
+
+        children = []
+        if parent_dir.exists():
+            for d in sorted(parent_dir.iterdir()):
+                if d.is_dir() and (d / "config.json").exists():
+                    cfg = json.loads((d / "config.json").read_text())
+                    child_path = f"{parent_path}/{d.name}"
+                    child = {"path": child_path, "name": d.name, "parent": parent_path, **cfg}
+                    child["avatar_color"] = cfg.get("avatar_color") or _agent_color(d.name)
+                    child["depth"] = child_path.count("/")
+                    children.append(child)
+        return web.json_response(children)
 
     async def handle_get_agent(self, request):
-        name = request.match_info["name"]
-        ad = self._agent_dir(name)
+        """GET /api/agents/{path} - 获取 agent 详情"""
+        path = request.match_info["name"]
+        ad = self._agent_dir(path)
         if not (ad / "config.json").exists():
             return web.json_response({"error": "not found"}, status=404)
         cfg = json.loads((ad / "config.json").read_text())
         soul = (ad / "soul.md").read_text() if (ad / "soul.md").exists() else ""
         identity = (ad / "identity.md").read_text() if (ad / "identity.md").exists() else ""
         user = (ad / "user.md").read_text() if (ad / "user.md").exists() else ""
-        return web.json_response({"name": name, **cfg, "soul": soul, "identity": identity, "user": user})
+        # 列出子 agent
+        children = []
+        for d in sorted(ad.iterdir()):
+            if d.is_dir() and (d / "config.json").exists():
+                children.append(d.name)
+        return web.json_response({"path": path, **cfg, "soul": soul, "identity": identity, "user": user, "children": children})
 
     async def handle_update_agent(self, request):
-        name = request.match_info["name"]; data = await request.json()
-        ad = self._agent_dir(name); ad.mkdir(parents=True, exist_ok=True)
-        cfg = {k: v for k, v in data.items() if k not in ("soul", "identity")}
+        """PUT /api/agents/{path} - 更新 agent 配置"""
+        path = request.match_info["name"]
+        data = await request.json()
+        ad = self._agent_dir(path)
+        if not (ad / "config.json").exists():
+            return web.json_response({"error": "not found"}, status=404)
+        cfg = json.loads((ad / "config.json").read_text())
+        # 更新允许的字段
+        for k in ("description", "avatar_color", "avatar_emoji", "model", "system_prompt",
+                   "execution_mode", "enabled", "sandbox_image", "sandbox_network", "sandbox_memory"):
+            if k in data:
+                cfg[k] = data[k]
         (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
         if "soul" in data: (ad / "soul.md").write_text(data["soul"])
         if "identity" in data: (ad / "identity.md").write_text(data["identity"])
+        if "user" in data: (ad / "user.md").write_text(data["user"])
+        logger.info(f"更新 Agent: {path}")
         return web.json_response({"ok": True})
 
     async def handle_delete_agent(self, request):
-        name = request.match_info["name"]; ad = self._agent_dir(name)
-        if ad.exists(): shutil.rmtree(ad)
+        """DELETE /api/agents/{path} - 删除 agent 及其所有子 agent"""
+        path = request.match_info["name"]
+        if path == "default":
+            return web.json_response({"error": "cannot delete default agent"}, status=403)
+        ad = self._agent_dir(path)
+        if not (ad / "config.json").exists():
+            return web.json_response({"error": "not found"}, status=404)
+        if ad.exists():
+            shutil.rmtree(ad)
+        logger.info(f"删除 Agent: {path}")
         return web.json_response({"ok": True})
 
     async def handle_get_soul(self, request):
-        p = self._agent_dir(request.match_info["name"]) / "soul.md"
+        path = request.match_info["name"]
+        p = self._agent_dir(path) / "soul.md"
+        if not p.parent.exists() or not (p.parent / "config.json").exists():
+            return web.json_response({"error": "not found"}, status=404)
         return web.json_response({"soul": p.read_text() if p.exists() else ""})
 
     async def handle_set_soul(self, request):
@@ -222,7 +435,10 @@ class ApiServer:
         return web.json_response({"ok": True})
 
     async def handle_get_identity(self, request):
-        p = self._agent_dir(request.match_info["name"]) / "identity.md"
+        path = request.match_info["name"]
+        p = self._agent_dir(path) / "identity.md"
+        if not p.parent.exists() or not (p.parent / "config.json").exists():
+            return web.json_response({"error": "not found"}, status=404)
         return web.json_response({"identity": p.read_text() if p.exists() else ""})
 
     async def handle_set_identity(self, request):
@@ -232,7 +448,10 @@ class ApiServer:
         return web.json_response({"ok": True})
 
     async def handle_get_user(self, request):
-        p = self._agent_dir(request.match_info["name"]) / "user.md"
+        path = request.match_info["name"]
+        p = self._agent_dir(path) / "user.md"
+        if not p.parent.exists() or not (p.parent / "config.json").exists():
+            return web.json_response({"error": "not found"}, status=404)
         return web.json_response({"user": p.read_text() if p.exists() else ""})
 
     async def handle_set_user(self, request):
