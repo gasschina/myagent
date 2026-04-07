@@ -471,6 +471,18 @@ def create_tray_icon(app: MyAgentApp, web_port: int = 8765):
         url = f"http://127.0.0.1:{web_port}/ui/"
         webbrowser.open(url)
 
+    def open_chat_ui(icon, item):
+        """打开聊天界面"""
+        import webbrowser
+        url = f"http://127.0.0.1:{web_port}/ui/chat.html"
+        webbrowser.open(url)
+
+    def open_execute(icon, item):
+        """打开执行/命令界面 (快捷打开聊天并发送一条提示)"""
+        import webbrowser
+        url = f"http://127.0.0.1:{web_port}/ui/chat.html"
+        webbrowser.open(url)
+
     def open_logs(icon, item):
         import subprocess
         import platform
@@ -517,8 +529,10 @@ def create_tray_icon(app: MyAgentApp, web_port: int = 8765):
     menu = pystray.Menu(
         pystray.MenuItem("🤖 MyAgent - 运行中", None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("🖥️  打开管理后台", open_web_ui,
+        pystray.MenuItem("🖥️  打开管理后台", open_web_ui),
+        pystray.MenuItem("💬  打开聊天界面", open_chat_ui,
                           default=True),  # 双击托盘图标打开
+        pystray.MenuItem("⚡  执行模式", open_execute),
         pystray.MenuItem("📋 显示状态", show_status),
         pystray.MenuItem("📁 打开工作目录", open_workdir),
         pystray.MenuItem("📄 打开日志目录", open_logs),

@@ -58,13 +58,53 @@ class ApiServer:
         r.add_get("/api/workdir/files", self.handle_list_workdir)
         r.add_get("/api/logs", self.handle_get_logs)
         r.add_get("/api/logs/stream", self.handle_log_stream)
+        r.add_post("/api/chat", self.handle_chat)
+        r.add_get("/chat", self.handle_chat_page)
         ui_dir = Path(__file__).parent / "ui"
         if ui_dir.exists():
             r.add_static("/ui", str(ui_dir))
             r.add_get("/", self.handle_index)
 
     async def handle_index(self, request):
-        raise web.HTTPFound("/ui/index.html")
+        raise web.HTTPFound("/ui/chat.html")
+
+    # --- Chat ---
+    async def handle_chat(self, request):
+        """POST /api/chat - 聊天消息处理"""
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        message = data.get("message", "").strip()
+        if not message:
+            return web.json_response({"error": "message is required"}, status=400)
+
+        session_id = data.get("session_id", "") or "web_default"
+
+        try:
+            response = await self.core.process_message(message, session_id)
+
+            # 保存到记忆
+            if self.core.memory:
+                from memory.manager import MemoryEntry
+                self.core.memory.add(MemoryEntry(
+                    role="user", content=message,
+                    session_id=session_id, category="short_term",
+                ))
+                self.core.memory.add(MemoryEntry(
+                    role="assistant", content=response,
+                    session_id=session_id, category="short_term",
+                ))
+
+            return web.json_response({"response": response, "session_id": session_id})
+        except Exception as e:
+            logger.error(f"Chat error: {e}", exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_chat_page(self, request):
+        """GET /chat - 重定向到聊天页面"""
+        raise web.HTTPFound("/ui/chat.html")
 
     # --- System ---
     async def handle_status(self, request):

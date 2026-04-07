@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MyAgent - AI 助手</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f7f8fa;--bg2:#ffffff;--bg3:#f0f1f3;--bg4:#e5e7eb;--bg5:#d1d5db;
+  --text:#1a1a2e;--text2:#6b7280;--text3:#9ca3af;
+  --accent:#4f46e5;--accent2:#6366f1;--accent-light:#eef2ff;--accent-dark:#3730a3;
+  --user-bubble:#4f46e5;--user-text:#ffffff;
+  --bot-bubble:#ffffff;--bot-text:#1a1a2e;
+  --ok:#10b981;--warn:#f59e0b;--danger:#ef4444;--info:#3b82f6;
+  --border:#e5e7eb;--border-light:#f0f1f3;
+  --radius:12px;--radius-sm:8px;--radius-xs:6px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.05);
+  --shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04);
+  --shadow-lg:0 10px 25px rgba(0,0,0,.08);
+  --sidebar-w:280px;--header-h:60px;
+  --transition:all .2s ease;
+}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Noto Sans SC',sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;overflow:hidden}
+a{color:var(--accent);text-decoration:none}
+button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,textarea{font:inherit}
+
+/* ── Layout ── */
+.app{display:flex;height:100vh;width:100vw;overflow:hidden}
+
+/* ── Sidebar ── */
+.sidebar{
+  width:var(--sidebar-w);min-width:var(--sidebar-w);height:100vh;
+  background:var(--bg2);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;z-index:20;
+  transition:transform .3s ease;
+}
+.sidebar.hidden{transform:translateX(-100%);position:absolute;left:0;top:0}
+
+.sidebar-header{
+  padding:16px 20px;border-bottom:1px solid var(--border-light);
+  display:flex;align-items:center;gap:12px;min-height:var(--header-h);
+}
+.sidebar-logo{
+  width:36px;height:36px;border-radius:10px;
+  background:linear-gradient(135deg,var(--accent),#7c3aed);
+  display:grid;place-items:center;flex-shrink:0;
+}
+.sidebar-logo svg{width:20px;height:20px;color:#fff}
+.sidebar-title{font-size:16px;font-weight:700;color:var(--text)}
+.sidebar-subtitle{font-size:11px;color:var(--text3)}
+
+.new-chat-btn{
+  margin:12px 16px 8px;padding:10px 16px;border-radius:var(--radius-sm);
+  background:var(--accent);color:#fff;font-size:13px;font-weight:600;
+  display:flex;align-items:center;gap:8px;transition:var(--transition);
+}
+.new-chat-btn:hover{background:var(--accent2);transform:translateY(-1px)}
+.new-chat-btn svg{width:16px;height:16px}
+
+.sidebar-search{
+  margin:4px 16px 8px;position:relative;
+}
+.sidebar-search input{
+  width:100%;padding:8px 12px 8px 34px;border-radius:var(--radius-xs);
+  border:1px solid var(--border);background:var(--bg);font-size:13px;
+  outline:none;transition:border-color .2s;
+}
+.sidebar-search input:focus{border-color:var(--accent)}
+.sidebar-search svg{
+  position:absolute;left:10px;top:50%;transform:translateY(-50%);
+  width:16px;height:16px;color:var(--text3);
+}
+
+.session-list{flex:1;overflow-y:auto;padding:4px 8px}
+.session-item{
+  display:flex;align-items:center;gap:10px;padding:10px 12px;
+  border-radius:var(--radius-sm);cursor:pointer;transition:var(--transition);
+  position:relative;
+}
+.session-item:hover{background:var(--bg3)}
+.session-item.active{background:var(--accent-light);color:var(--accent2)}
+.session-item.active::before{
+  content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);
+  width:3px;height:24px;background:var(--accent);border-radius:0 2px 2px 0;
+}
+.session-icon{width:32px;height:32px;border-radius:8px;background:var(--bg3);
+  display:grid;place-items:center;flex-shrink:0;font-size:14px}
+.session-item.active .session-icon{background:var(--accent-light);color:var(--accent)}
+.session-info{flex:1;min-width:0}
+.session-name{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.session-preview{font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.session-meta{font-size:10px;color:var(--text3);flex-shrink:0;text-align:right}
+.session-delete{
+  opacity:0;position:absolute;right:8px;top:50%;transform:translateY(-50%);
+  width:24px;height:24px;border-radius:4px;display:grid;place-items:center;
+  background:var(--bg2);transition:var(--transition);font-size:12px;color:var(--text3);
+}
+.session-item:hover .session-delete{opacity:1}
+.session-delete:hover{background:var(--danger);color:#fff}
+
+.sidebar-footer{
+  padding:12px 16px;border-top:1px solid var(--border-light);
+  display:flex;flex-direction:column;gap:6px;
+}
+.sidebar-footer-btn{
+  display:flex;align-items:center;gap:10px;padding:8px 12px;
+  border-radius:var(--radius-xs);font-size:13px;color:var(--text2);
+  transition:var(--transition);
+}
+.sidebar-footer-btn:hover{background:var(--bg3);color:var(--text)}
+.sidebar-footer-btn svg{width:16px;height:16px}
+.model-badge{
+  margin-left:auto;font-size:10px;padding:2px 8px;border-radius:10px;
+  background:var(--accent-light);color:var(--accent);font-weight:600;
+}
+
+/* ── Main ── */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;background:var(--bg)}
+.main-header{
+  height:var(--header-h);min-height:var(--header-h);
+  display:flex;align-items:center;gap:12px;padding:0 20px;
+  background:var(--bg2);border-bottom:1px solid var(--border-light);
+}
+.toggle-sidebar{width:36px;height:36px;border-radius:var(--radius-xs);
+  display:grid;place-items:center;color:var(--text2);transition:var(--transition)}
+.toggle-sidebar:hover{background:var(--bg3);color:var(--text)}
+.toggle-sidebar svg{width:20px;height:20px}
+.main-title{flex:1;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.main-title .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.header-actions{display:flex;gap:6px}
+.header-btn{width:36px;height:36px;border-radius:var(--radius-xs);
+  display:grid;place-items:center;color:var(--text2);transition:var(--transition)}
+.header-btn:hover{background:var(--bg3);color:var(--text)}
+.header-btn svg{width:18px;height:18px}
+
+/* ── Messages ── */
+.messages-container{flex:1;overflow-y:auto;padding:20px}
+.messages-inner{max-width:800px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+
+.message-row{display:flex;gap:10px;animation:msgIn .25s ease-out}
+@keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.message-row.user{flex-direction:row-reverse}
+
+.message-avatar{
+  width:32px;height:32px;border-radius:8px;flex-shrink:0;
+  display:grid;place-items:center;font-size:14px;
+}
+.message-row.user .message-avatar{background:var(--accent);color:#fff}
+.message-row.assistant .message-avatar{background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff}
+
+.message-bubble{
+  max-width:70%;padding:12px 16px;border-radius:var(--radius);
+  font-size:14px;line-height:1.7;word-break:break-word;
+  box-shadow:var(--shadow-sm);
+}
+.message-row.user .message-bubble{
+  background:var(--user-bubble);color:var(--user-text);
+  border-bottom-right-radius:4px;
+}
+.message-row.assistant .message-bubble{
+  background:var(--bot-bubble);color:var(--bot-text);
+  border:1px solid var(--border-light);
+  border-bottom-left-radius:4px;
+}
+.message-bubble p{margin-bottom:8px}
+.message-bubble p:last-child{margin-bottom:0}
+.message-bubble code{
+  background:rgba(0,0,0,.06);padding:2px 6px;border-radius:4px;
+  font-family:'SF Mono','Fira Code','Cascadia Code',monospace;font-size:12.5px;
+}
+.message-row.user .message-bubble code{background:rgba(255,255,255,.2)}
+.message-bubble pre{
+  background:#1e1e2e;color:#cdd6f4;padding:14px 16px;border-radius:var(--radius-sm);
+  overflow-x:auto;margin:8px 0;font-size:12.5px;line-height:1.5;
+  font-family:'SF Mono','Fira Code','Cascadia Code',monospace;
+}
+.message-bubble pre code{background:none;padding:0;font-size:inherit}
+.message-bubble strong{font-weight:600}
+.message-bubble em{font-style:italic}
+.message-bubble ul,.message-bubble ol{padding-left:20px;margin:6px 0}
+.message-bubble li{margin:3px 0}
+.message-bubble blockquote{
+  border-left:3px solid var(--accent);padding:4px 12px;margin:8px 0;
+  color:var(--text2);font-style:italic;
+}
+.message-time{font-size:10px;color:var(--text3);margin-top:4px}
+
+/* Typing indicator */
+.typing-indicator{
+  display:flex;gap:10px;animation:msgIn .25s ease-out;
+}
+.typing-bubble{
+  background:var(--bot-bubble);border:1px solid var(--border-light);
+  border-radius:var(--radius);border-bottom-left-radius:4px;
+  padding:14px 20px;display:flex;align-items:center;gap:5px;
+  box-shadow:var(--shadow-sm);
+}
+.typing-dot{
+  width:8px;height:8px;border-radius:50%;background:var(--text3);
+  animation:typingBounce 1.4s infinite;
+}
+.typing-dot:nth-child(2){animation-delay:.2s}
+.typing-dot:nth-child(3){animation-delay:.4s}
+@keyframes typingBounce{
+  0%,60%,100%{transform:translateY(0);opacity:.4}
+  30%{transform:translateY(-6px);opacity:1}
+}
+
+/* Empty state */
+.empty-state{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:40px 20px;color:var(--text3);text-align:center;
+}
+.empty-icon{font-size:56px;margin-bottom:16px;opacity:.5}
+.empty-title{font-size:18px;font-weight:600;color:var(--text2);margin-bottom:8px}
+.empty-desc{font-size:13px;max-width:400px;line-height:1.6;margin-bottom:24px}
+.quick-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.quick-action{
+  padding:8px 16px;border-radius:20px;background:var(--bg2);
+  border:1px solid var(--border);font-size:13px;color:var(--text2);
+  transition:var(--transition);
+}
+.quick-action:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light)}
+
+/* ── Input Area ── */
+.input-area{
+  padding:16px 20px;background:var(--bg2);border-top:1px solid var(--border-light);
+}
+.input-wrapper{max-width:800px;margin:0 auto}
+.input-box{
+  display:flex;align-items:flex-end;gap:10px;
+  background:var(--bg);border:1px solid var(--border);
+  border-radius:var(--radius);padding:8px 12px;
+  transition:border-color .2s,box-shadow .2s;
+}
+.input-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-light)}
+.input-box textarea{
+  flex:1;border:none;background:none;outline:none;resize:none;
+  font-size:14px;line-height:1.5;max-height:150px;min-height:24px;
+  padding:4px 0;color:var(--text);
+}
+.input-box textarea::placeholder{color:var(--text3)}
+
+.send-btn{
+  width:36px;height:36px;border-radius:var(--radius-sm);
+  background:var(--accent);color:#fff;
+  display:grid;place-items:center;flex-shrink:0;
+  transition:var(--transition);
+}
+.send-btn:hover{background:var(--accent2)}
+.send-btn:disabled{opacity:.35;cursor:default}
+.send-btn svg{width:18px;height:18px}
+
+.stop-btn{
+  width:36px;height:36px;border-radius:var(--radius-sm);
+  background:var(--danger);color:#fff;
+  display:grid;place-items:center;flex-shrink:0;
+  transition:var(--transition);animation:pulse 1.5s infinite;
+}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+.stop-btn svg{width:14px;height:14px}
+
+.input-hint{font-size:11px;color:var(--text3);text-align:center;margin-top:6px}
+
+/* ── Toast ── */
+.toast-container{position:fixed;top:20px;right:20px;z-index:200;display:flex;flex-direction:column;gap:8px}
+.toast{
+  padding:12px 20px;border-radius:var(--radius-sm);font-size:13px;
+  animation:toastIn .3s ease;box-shadow:var(--shadow-lg);max-width:360px;
+  display:flex;align-items:center;gap:8px;
+}
+@keyframes toastIn{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+.toast-error{background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
+.toast-success{background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
+.toast-info{background:#eff6ff;color:#1e3a5f;border:1px solid #bfdbfe}
+
+/* ── Confirm Dialog ── */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:100;
+  display:flex;align-items:center;justify-content:center;
+  animation:fadeIn .15s ease;
+}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal{
+  background:var(--bg2);border-radius:var(--radius);padding:24px;
+  width:90%;max-width:400px;box-shadow:var(--shadow-lg);
+}
+.modal h3{font-size:16px;font-weight:600;margin-bottom:8px}
+.modal p{font-size:13px;color:var(--text2);margin-bottom:20px}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end}
+.modal-btn{
+  padding:8px 20px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;
+  transition:var(--transition);
+}
+.modal-btn-cancel{background:var(--bg3);color:var(--text2)}
+.modal-btn-cancel:hover{background:var(--bg4)}
+.modal-btn-danger{background:var(--danger);color:#fff}
+.modal-btn-danger:hover{background:#dc2626}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--bg5)}
+
+/* ── Welcome Message ── */
+.welcome-card{
+  background:var(--bg2);border:1px solid var(--border-light);
+  border-radius:var(--radius);padding:24px;margin:8px 0;
+}
+.welcome-card h2{font-size:18px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.welcome-card h2 .emoji{font-size:24px}
+.welcome-card .subtitle{font-size:13px;color:var(--text2);margin-bottom:16px}
+.capabilities{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.capability{
+  display:flex;align-items:center;gap:8px;padding:8px 12px;
+  border-radius:var(--radius-xs);background:var(--bg);font-size:12px;color:var(--text2);
+}
+.capability .cap-icon{font-size:16px}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      </div>
+      <div>
+        <div class="sidebar-title">MyAgent</div>
+        <div class="sidebar-subtitle">AI 助手</div>
+      </div>
+    </div>
+
+    <button class="new-chat-btn" onclick="newChat()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      新对话
+    </button>
+
+    <div class="sidebar-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" placeholder="搜索对话..." id="searchInput" oninput="filterSessions()">
+    </div>
+
+    <div class="session-list" id="sessionList">
+      <!-- sessions loaded dynamically -->
+    </div>
+
+    <div class="sidebar-footer">
+      <button class="sidebar-footer-btn" onclick="window.open('/ui/index.html','_blank')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        管理后台
+      </button>
+      <button class="sidebar-footer-btn" onclick="showStatus()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        系统状态
+        <span class="model-badge" id="modelBadge">...</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="main-header">
+      <button class="toggle-sidebar" onclick="toggleSidebar()" title="切换侧栏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <div class="main-title">
+        <span class="dot"></span>
+        <span id="headerTitle">新对话</span>
+      </div>
+      <div class="header-actions">
+        <button class="header-btn" onclick="clearCurrentChat()" title="清空当前对话">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="messages-container" id="messagesContainer">
+      <div class="messages-inner" id="messagesInner">
+        <!-- Welcome card shown when no messages -->
+        <div class="welcome-card" id="welcomeCard">
+          <h2><span class="emoji">👋</span> 你好，我是 MyAgent</h2>
+          <p class="subtitle">本地桌面端执行型 AI 助手 — 我可以帮你写代码、搜索信息、管理文件等</p>
+          <div class="capabilities">
+            <div class="capability"><span class="cap-icon">💻</span> 代码编写与执行</div>
+            <div class="capability"><span class="cap-icon">🔍</span> 网络搜索与阅读</div>
+            <div class="capability"><span class="cap-icon">📁</span> 文件管理与操作</div>
+            <div class="capability"><span class="cap-icon">🧠</span> 长期记忆系统</div>
+            <div class="capability"><span class="cap-icon">🌐</span> 多平台接入</div>
+            <div class="capability"><span class="cap-icon">🛠️</span> 系统命令执行</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Input -->
+    <div class="input-area">
+      <div class="input-wrapper">
+        <div class="input-box">
+          <textarea id="userInput" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoResize(this)"></textarea>
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
+          <button class="stop-btn" id="stopBtn" onclick="stopGenerating()" style="display:none">
+            <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+        <div class="input-hint">MyAgent 可能会出错，请核实重要信息</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// ── State ──
+const state = {
+  sessions: [],          // [{id, name, messages: int, last: string}]
+  activeSessionId: null,
+  messages: [],          // [{role, content, time}]
+  isGenerating: false,
+  abortController: null,
+  systemStatus: null,
+};
+
+// ── Init ──
+document.addEventListener('DOMContentLoaded', () => {
+  loadSessions();
+  loadStatus();
+  // Enable/disable send button
+  document.getElementById('userInput').addEventListener('input', function() {
+    document.getElementById('sendBtn').disabled = !this.value.trim();
+  });
+});
+
+// ── API Calls ──
+async function api(url, options = {}) {
+  try {
+    const resp = await fetch(url, {
+      headers: { 'Content-Type': 'application/json', ...options.headers },
+      ...options,
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    console.error('API error:', e);
+    throw e;
+  }
+}
+
+// ── Status ──
+async function loadStatus() {
+  try {
+    const data = await api('/api/status');
+    state.systemStatus = data;
+    document.getElementById('modelBadge').textContent =
+      `${(data.provider || '?').split('/')[0]}/${(data.model || '?').split('/').pop()}`;
+  } catch (e) {
+    document.getElementById('modelBadge').textContent = '离线';
+  }
+}
+
+function showStatus() {
+  const s = state.systemStatus;
+  if (!s) { toast('无法获取系统状态', 'error'); return; }
+  const info = `🤖 MyAgent 状态\n━━━━━━━━━━━━\n状态: ${s.running ? '✅ 运行中' : '❌ 停止'}\n模型: ${s.provider}/${s.model}\n技能: ${s.skills} 个\n记忆: ${s.memory?.short_term_count || 0} 短期 / ${s.memory?.long_term_count || 0} 长期`;
+  alert(info);
+}
+
+// ── Sessions ──
+async function loadSessions() {
+  try {
+    const data = await api('/api/sessions');
+    state.sessions = (data || []).map(s => ({
+      id: s.id,
+      name: formatSessionName(s.id),
+      messages: s.messages || 0,
+      last: s.last || '',
+    }));
+    // Add "new chat" option
+    if (state.sessions.length === 0 || state.sessions[0].id !== '__new__') {
+      state.sessions.unshift({ id: '__new__', name: '新对话', messages: 0, last: '' });
+    }
+    renderSessions();
+  } catch (e) {
+    // Offline - use local sessions
+    state.sessions = [{ id: '__new__', name: '新对话', messages: 0, last: '' }];
+    renderSessions();
+  }
+}
+
+function formatSessionName(id) {
+  if (id.startsWith('web_')) return id.replace('web_', '').replace(/_/g, ' ');
+  if (id.startsWith('cli_')) return 'CLI: ' + id.replace('cli_', '');
+  return id.length > 20 ? id.slice(0, 20) + '...' : id;
+}
+
+function renderSessions(filter = '') {
+  const list = document.getElementById('sessionList');
+  const fl = filter.toLowerCase();
+  const filtered = state.sessions.filter(s =>
+    !fl || s.name.toLowerCase().includes(fl) || s.id.toLowerCase().includes(fl)
+  );
+
+  list.innerHTML = filtered.map(s => `
+    <div class="session-item ${s.id === state.activeSessionId ? 'active' : ''}"
+         onclick="selectSession('${escapeHtml(s.id)}')" title="${escapeHtml(s.id)}">
+      <div class="session-icon">${s.id === '__new__' ? '✨' : '💬'}</div>
+      <div class="session-info">
+        <div class="session-name">${escapeHtml(s.name)}</div>
+        <div class="session-preview">${s.messages > 0 ? s.messages + ' 条消息' : '暂无消息'}</div>
+      </div>
+      ${s.id !== '__new__' ? `
+        <button class="session-delete" onclick="event.stopPropagation();deleteSession('${escapeHtml(s.id)}')" title="删除">✕</button>
+      ` : ''}
+    </div>
+  `).join('');
+}
+
+function filterSessions() {
+  renderSessions(document.getElementById('searchInput').value);
+}
+
+function newChat() {
+  state.activeSessionId = '__new__';
+  state.messages = [];
+  document.getElementById('headerTitle').textContent = '新对话';
+  document.getElementById('welcomeCard').style.display = '';
+  renderMessages();
+  renderSessions();
+  document.getElementById('userInput').focus();
+}
+
+async function selectSession(id) {
+  if (id === '__new__') { newChat(); return; }
+
+  state.activeSessionId = id;
+  document.getElementById('headerTitle').textContent = formatSessionName(id);
+  document.getElementById('welcomeCard').style.display = 'none';
+  renderSessions();
+
+  // Load messages
+  try {
+    const data = await api(`/api/sessions/${encodeURIComponent(id)}/messages`);
+    state.messages = (data || []).map(m => ({
+      role: m.role,
+      content: m.content,
+      time: m.time || '',
+    }));
+  } catch (e) {
+    state.messages = [];
+    toast('加载消息失败', 'error');
+  }
+  renderMessages();
+}
+
+async function deleteSession(id) {
+  if (!confirm('确定删除此对话？')) return;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (state.activeSessionId === id) newChat();
+    await loadSessions();
+    toast('对话已删除', 'success');
+  } catch (e) {
+    toast('删除失败', 'error');
+  }
+}
+
+function clearCurrentChat() {
+  if (!state.activeSessionId || state.activeSessionId === '__new__') return;
+  if (!confirm('确定清空当前对话？')) return;
+  api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}`, { method: 'DELETE' })
+    .then(() => {
+      state.messages = [];
+      renderMessages();
+      toast('对话已清空', 'success');
+      loadSessions();
+    })
+    .catch(() => toast('清空失败', 'error'));
+}
+
+// ── Messages ──
+function renderMessages() {
+  const container = document.getElementById('messagesInner');
+  if (state.messages.length === 0) {
+    container.innerHTML = document.getElementById('welcomeCard') ?
+      container.innerHTML : `
+      <div class="welcome-card" id="welcomeCard">
+        <h2><span class="emoji">👋</span> 你好，我是 MyAgent</h2>
+        <p class="subtitle">本地桌面端执行型 AI 助手 — 我可以帮你写代码、搜索信息、管理文件等</p>
+        <div class="capabilities">
+          <div class="capability"><span class="cap-icon">💻</span> 代码编写与执行</div>
+          <div class="capability"><span class="cap-icon">🔍</span> 网络搜索与阅读</div>
+          <div class="capability"><span class="cap-icon">📁</span> 文件管理与操作</div>
+          <div class="capability"><span class="cap-icon">🧠</span> 长期记忆系统</div>
+          <div class="capability"><span class="cap-icon">🌐</span> 多平台接入</div>
+          <div class="capability"><span class="cap-icon">🛠️</span> 系统命令执行</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const welcomeCard = document.getElementById('welcomeCard');
+  if (welcomeCard) welcomeCard.style.display = 'none';
+
+  let html = '';
+  for (const msg of state.messages) {
+    const isUser = msg.role === 'user';
+    const avatar = isUser ? '👤' : '🤖';
+    const content = renderMarkdown(msg.content);
+    html += `
+      <div class="message-row ${msg.role}">
+        <div class="message-avatar">${avatar}</div>
+        <div>
+          <div class="message-bubble">${content}</div>
+          ${msg.time ? `<div class="message-time">${formatTime(msg.time)}</div>` : ''}
+        </div>
+      </div>`;
+  }
+
+  // Keep welcome card in DOM but hidden
+  container.innerHTML = html +
+    '<div class="welcome-card" id="welcomeCard" style="display:none"></div>';
+
+  scrollToBottom();
+}
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  // Code blocks
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    return `<pre><code>${escapeHtml(code.trim())}</code></pre>`;
+  });
+  // Inline code
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Lists
+  text = text.replace(/^[-•]\s+(.+)$/gm, '<li>$1</li>');
+  text = text.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+  text = text.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
+  // Blockquote
+  text = text.replace(/^>\s+(.+)$/gm, '<blockquote>$1</blockquote>');
+  // Paragraphs
+  text = text.replace(/\n\n+/g, '</p><p>');
+  text = text.replace(/\n/g, '<br>');
+  text = '<p>' + text + '</p>';
+  // Clean up empty paragraphs
+  text = text.replace(/<p>\s*<\/p>/g, '');
+  return text;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function formatTime(timeStr) {
+  if (!timeStr) return '';
+  try {
+    const d = new Date(timeStr);
+    const now = new Date();
+    const diff = now - d;
+    if (diff < 60000) return '刚刚';
+    if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
+    return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return timeStr;
+  }
+}
+
+function scrollToBottom() {
+  const c = document.getElementById('messagesContainer');
+  requestAnimationFrame(() => { c.scrollTop = c.scrollHeight; });
+}
+
+// ── Send Message ──
+async function sendMessage() {
+  const input = document.getElementById('userInput');
+  const text = input.value.trim();
+  if (!text || state.isGenerating) return;
+
+  // Create session if needed
+  let sessionId = state.activeSessionId;
+  if (!sessionId || sessionId === '__new__') {
+    sessionId = 'web_' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    state.activeSessionId = sessionId;
+    document.getElementById('headerTitle').textContent = formatSessionName(sessionId);
+  }
+
+  // Add user message
+  state.messages.push({ role: 'user', content: text, time: new Date().toISOString() });
+  renderMessages();
+
+  // Clear input
+  input.value = '';
+  input.style.height = 'auto';
+  document.getElementById('sendBtn').disabled = true;
+
+  // Show typing
+  state.isGenerating = true;
+  showTypingIndicator();
+  document.getElementById('sendBtn').style.display = 'none';
+  document.getElementById('stopBtn').style.display = '';
+
+  try {
+    state.abortController = new AbortController();
+    const data = await api('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: text, session_id: sessionId }),
+      signal: state.abortController.signal,
+    });
+
+    // Add assistant response
+    state.messages.push({
+      role: 'assistant',
+      content: data.response || '(无回复)',
+      time: new Date().toISOString(),
+    });
+
+    // Update session in list
+    const existing = state.sessions.find(s => s.id === sessionId);
+    if (existing) {
+      existing.messages = (existing.messages || 0) + 2;
+      existing.last = new Date().toISOString();
+    } else {
+      state.sessions.splice(1, 0, {
+        id: sessionId,
+        name: formatSessionName(sessionId),
+        messages: 2,
+        last: new Date().toISOString(),
+      });
+    }
+    renderSessions();
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      state.messages.push({ role: 'assistant', content: '⏹️ 已停止生成', time: new Date().toISOString() });
+    } else {
+      toast('发送失败: ' + e.message, 'error');
+      state.messages.push({ role: 'assistant', content: '❌ 请求失败: ' + e.message, time: new Date().toISOString() });
+    }
+  } finally {
+    state.isGenerating = false;
+    state.abortController = null;
+    hideTypingIndicator();
+    document.getElementById('sendBtn').style.display = '';
+    document.getElementById('sendBtn').disabled = true;
+    document.getElementById('stopBtn').style.display = 'none';
+    renderMessages();
+    input.focus();
+  }
+}
+
+function stopGenerating() {
+  if (state.abortController) {
+    state.abortController.abort();
+  }
+}
+
+function showTypingIndicator() {
+  const container = document.getElementById('messagesInner');
+  const el = document.createElement('div');
+  el.className = 'typing-indicator';
+  el.id = 'typingIndicator';
+  el.innerHTML = `
+    <div class="message-avatar" style="background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-radius:8px;width:32px;height:32px;display:grid;place-items:center;font-size:14px">🤖</div>
+    <div class="typing-bubble">
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+    </div>`;
+  container.appendChild(el);
+  scrollToBottom();
+}
+
+function hideTypingIndicator() {
+  const el = document.getElementById('typingIndicator');
+  if (el) el.remove();
+}
+
+// ── Input Handling ──
+function handleKeyDown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 150) + 'px';
+}
+
+// ── Sidebar Toggle ──
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('hidden');
+}
+
+// ── Toast ──
+function toast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = message;
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3000);
+}
+
+// ── Keyboard Shortcuts ──
+document.addEventListener('keydown', (e) => {
+  // Ctrl/Cmd + N: new chat
+  if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+    e.preventDefault();
+    newChat();
+  }
+  // Ctrl/Cmd + B: toggle sidebar
+  if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
+    e.preventDefault();
+    toggleSidebar();
+  }
+  // Ctrl/Cmd + /: focus input
+  if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+    e.preventDefault();
+    document.getElementById('userInput').focus();
+  }
+});
+</script>
+</body>
+</html>
