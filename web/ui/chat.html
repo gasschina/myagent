@@ -18,13 +18,13 @@
   --shadow-sm:0 1px 2px rgba(0,0,0,.05);
   --shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04);
   --shadow-lg:0 10px 25px rgba(0,0,0,.08);
-  --sidebar-w:280px;--header-h:60px;
+  --sidebar-w:280px;--header-h:60px;--agent-panel-w:300px;
   --transition:all .2s ease;
 }
 html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Noto Sans SC',sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;overflow:hidden}
 a{color:var(--accent);text-decoration:none}
 button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
-input,textarea{font:inherit}
+input,textarea,select{font:inherit}
 
 /* ── Layout ── */
 .app{display:flex;height:100vh;width:100vw;overflow:hidden}
@@ -319,11 +319,217 @@ input,textarea{font:inherit}
   border-radius:var(--radius-xs);background:var(--bg);font-size:12px;color:var(--text2);
 }
 .capability .cap-icon{font-size:16px}
+
+/* ══════════════════════════════════════════════════════
+   ── Agent Panel (RIGHT) ──
+   ══════════════════════════════════════════════════════ */
+.agent-panel{
+  width:var(--agent-panel-w);min-width:0;height:100vh;
+  background:var(--bg2);border-left:1px solid var(--border);
+  display:flex;flex-direction:column;z-index:15;
+  transition:width .35s cubic-bezier(.4,0,.2,1),min-width .35s cubic-bezier(.4,0,.2,1),opacity .25s ease;
+  overflow:hidden;
+}
+.agent-panel.collapsed{
+  width:0;min-width:0;border-left:none;
+}
+
+.agent-panel-header{
+  padding:16px 16px 12px;border-bottom:1px solid var(--border-light);
+  display:flex;align-items:center;gap:10px;min-height:var(--header-h);
+  flex-shrink:0;
+}
+.agent-panel-header h3{
+  flex:1;font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px;
+  white-space:nowrap;
+}
+.agent-panel-header h3 .agents-emoji{font-size:18px}
+
+.agent-create-btn{
+  width:30px;height:30px;border-radius:var(--radius-xs);
+  background:var(--accent);color:#fff;
+  display:grid;place-items:center;flex-shrink:0;
+  transition:var(--transition);font-size:16px;font-weight:600;
+}
+.agent-create-btn:hover{background:var(--accent2);transform:scale(1.05)}
+.agent-create-btn svg{width:16px;height:16px}
+
+/* Agent list */
+.agent-list{flex:1;overflow-y:auto;padding:8px 12px}
+
+.agent-card{
+  display:flex;align-items:flex-start;gap:10px;padding:10px 12px;
+  border-radius:var(--radius-sm);cursor:pointer;transition:var(--transition);
+  position:relative;margin-bottom:4px;
+  border:1px solid transparent;
+}
+.agent-card:hover{background:var(--bg3);border-color:var(--border-light)}
+.agent-card.active{
+  background:var(--accent-light);
+  border-color:var(--accent);
+}
+.agent-card.active::after{
+  content:'';position:absolute;right:0;top:50%;transform:translateY(-50%);
+  width:3px;height:24px;background:var(--accent);border-radius:2px 0 0 2px;
+}
+
+.agent-avatar{
+  width:38px;height:38px;border-radius:10px;flex-shrink:0;
+  display:grid;place-items:center;font-size:16px;font-weight:700;color:#fff;
+  position:relative;
+}
+.agent-avatar .status-dot{
+  position:absolute;bottom:-1px;right:-1px;width:11px;height:11px;
+  border-radius:50%;background:var(--ok);border:2px solid var(--bg2);
+}
+
+.agent-info{flex:1;min-width:0;padding-top:2px}
+.agent-name{
+  font-size:13px;font-weight:600;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  display:flex;align-items:center;gap:6px;
+}
+.agent-name .model-tag{
+  font-size:9px;font-weight:500;padding:1px 6px;border-radius:8px;
+  background:var(--bg3);color:var(--text3);white-space:nowrap;
+  max-width:90px;overflow:hidden;text-overflow:ellipsis;
+}
+.agent-card.active .agent-name{color:var(--accent-dark)}
+.agent-desc{
+  font-size:11px;color:var(--text3);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  line-height:1.4;
+}
+
+.agent-settings-btn{
+  position:absolute;top:10px;right:8px;
+  width:26px;height:26px;border-radius:6px;
+  display:grid;place-items:center;
+  color:var(--text3);opacity:0;
+  transition:var(--transition);
+}
+.agent-card:hover .agent-settings-btn{opacity:1}
+.agent-settings-btn:hover{background:var(--bg4);color:var(--text2)}
+.agent-settings-btn svg{width:14px;height:14px}
+
+/* Agent panel footer / collapse toggle */
+.agent-panel-footer{
+  padding:10px 16px;border-top:1px solid var(--border-light);
+  flex-shrink:0;
+}
+.agent-collapse-btn{
+  width:100%;padding:8px;border-radius:var(--radius-xs);
+  display:flex;align-items:center;justify-content:center;gap:6px;
+  font-size:12px;color:var(--text3);
+  transition:var(--transition);
+}
+.agent-collapse-btn:hover{background:var(--bg3);color:var(--text2)}
+.agent-collapse-btn svg{width:14px;height:14px;transition:transform .35s ease}
+.agent-panel.collapsed ~ .main .agent-expand-float svg{
+  transform:rotate(180deg);
+}
+
+/* Floating expand button (visible when panel collapsed) */
+.agent-expand-float{
+  position:fixed;right:12px;top:50%;transform:translateY(-50%);
+  width:32px;height:48px;border-radius:8px;
+  background:var(--bg2);border:1px solid var(--border);
+  box-shadow:var(--shadow);z-index:16;
+  display:grid;place-items:center;
+  color:var(--text2);transition:var(--transition);
+  cursor:pointer;
+}
+.agent-expand-float:hover{background:var(--bg3);color:var(--text);box-shadow:var(--shadow-lg)}
+.agent-expand-float svg{width:16px;height:16px}
+.agent-expand-float.hidden{display:none}
+
+/* ── Create / Edit Agent Modal ── */
+.agent-modal{
+  background:var(--bg2);border-radius:var(--radius);padding:28px;
+  width:90%;max-width:520px;box-shadow:var(--shadow-lg);
+  max-height:85vh;overflow-y:auto;
+}
+.agent-modal h3{font-size:18px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.agent-modal .modal-subtitle{font-size:12px;color:var(--text3);margin-bottom:20px}
+
+.agent-form-group{margin-bottom:16px}
+.agent-form-group label{
+  display:block;font-size:12px;font-weight:600;color:var(--text2);
+  margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;
+}
+.agent-form-group input,
+.agent-form-group textarea,
+.agent-form-group select{
+  width:100%;padding:10px 14px;border-radius:var(--radius-xs);
+  border:1px solid var(--border);background:var(--bg);font-size:13px;
+  outline:none;transition:border-color .2s;color:var(--text);
+}
+.agent-form-group input:focus,
+.agent-form-group textarea:focus,
+.agent-form-group select:focus{border-color:var(--accent)}
+.agent-form-group textarea{resize:vertical;min-height:80px;line-height:1.5}
+.agent-form-group .hint{font-size:11px;color:var(--text3);margin-top:4px}
+
+.agent-avatar-picker{
+  display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;
+}
+.agent-avatar-option{
+  width:36px;height:36px;border-radius:8px;
+  display:grid;place-items:center;font-size:16px;cursor:pointer;
+  border:2px solid transparent;transition:var(--transition);
+}
+.agent-avatar-option:hover{transform:scale(1.1)}
+.agent-avatar-option.selected{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-light)}
+
+.agent-modal-actions{
+  display:flex;gap:8px;justify-content:flex-end;margin-top:24px;
+  padding-top:16px;border-top:1px solid var(--border-light);
+}
+.agent-modal-btn{
+  padding:10px 24px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;
+  transition:var(--transition);
+}
+.agent-modal-btn-cancel{background:var(--bg3);color:var(--text2)}
+.agent-modal-btn-cancel:hover{background:var(--bg4)}
+.agent-modal-btn-primary{background:var(--accent);color:#fff}
+.agent-modal-btn-primary:hover{background:var(--accent2)}
+.agent-modal-btn-delete{background:var(--danger);color:#fff;margin-right:auto}
+.agent-modal-btn-delete:hover{background:#dc2626}
+
+/* ── Active agent indicator in header ── */
+.active-agent-badge{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:3px 10px 3px 6px;border-radius:20px;
+  background:var(--accent-light);font-size:12px;color:var(--accent);
+  font-weight:500;
+}
+.active-agent-badge .badge-avatar{
+  width:20px;height:20px;border-radius:50%;
+  display:grid;place-items:center;font-size:10px;color:#fff;
+}
+
+/* ── Agent color themes ── */
+.agent-color-0{background:linear-gradient(135deg,#6366f1,#8b5cf6)}
+.agent-color-1{background:linear-gradient(135deg,#ec4899,#f43f5e)}
+.agent-color-2{background:linear-gradient(135deg,#f59e0b,#f97316)}
+.agent-color-3{background:linear-gradient(135deg,#10b981,#059669)}
+.agent-color-4{background:linear-gradient(135deg,#3b82f6,#0ea5e9)}
+.agent-color-5{background:linear-gradient(135deg,#8b5cf6,#a855f7)}
+.agent-color-6{background:linear-gradient(135deg,#ef4444,#dc2626)}
+.agent-color-7{background:linear-gradient(135deg,#14b8a6,#06b6d4)}
+
+/* ── No agents empty state ── */
+.agent-empty{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:24px 16px;color:var(--text3);text-align:center;
+}
+.agent-empty-icon{font-size:40px;margin-bottom:10px;opacity:.4}
+.agent-empty-text{font-size:12px;line-height:1.5}
 </style>
 </head>
 <body>
 <div class="app">
-  <!-- Sidebar -->
+  <!-- Sidebar (Sessions) -->
   <div class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <div class="sidebar-logo">
@@ -362,8 +568,8 @@ input,textarea{font:inherit}
     </div>
   </div>
 
-  <!-- Main -->
-  <div class="main">
+  <!-- Main (Chat) -->
+  <div class="main" id="mainArea">
     <div class="main-header">
       <button class="toggle-sidebar" onclick="toggleSidebar()" title="切换侧栏">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
@@ -371,6 +577,10 @@ input,textarea{font:inherit}
       <div class="main-title">
         <span class="dot"></span>
         <span id="headerTitle">新对话</span>
+        <span class="active-agent-badge" id="activeAgentBadge">
+          <span class="badge-avatar" id="badgeAvatar">D</span>
+          <span id="badgeName">default</span>
+        </span>
       </div>
       <div class="header-actions">
         <button class="header-btn" onclick="clearCurrentChat()" title="清空当前对话">
@@ -383,8 +593,8 @@ input,textarea{font:inherit}
       <div class="messages-inner" id="messagesInner">
         <!-- Welcome card shown when no messages -->
         <div class="welcome-card" id="welcomeCard">
-          <h2><span class="emoji">👋</span> 你好，我是 MyAgent</h2>
-          <p class="subtitle">本地桌面端执行型 AI 助手 — 我可以帮你写代码、搜索信息、管理文件等</p>
+          <h2><span class="emoji" id="welcomeEmoji">👋</span> <span id="welcomeTitle">你好，我是 MyAgent</span></h2>
+          <p class="subtitle" id="welcomeSubtitle">本地桌面端执行型 AI 助手 — 我可以帮你写代码、搜索信息、管理文件等</p>
           <div class="capabilities">
             <div class="capability"><span class="cap-icon">💻</span> 代码编写与执行</div>
             <div class="capability"><span class="cap-icon">🔍</span> 网络搜索与阅读</div>
@@ -413,10 +623,39 @@ input,textarea{font:inherit}
       </div>
     </div>
   </div>
+
+  <!-- Agent Panel (RIGHT) -->
+  <div class="agent-panel" id="agentPanel">
+    <div class="agent-panel-header">
+      <h3><span class="agents-emoji">🤖</span> Agents</h3>
+      <button class="agent-create-btn" onclick="showCreateAgentModal()" title="创建新 Agent">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+    </div>
+
+    <div class="agent-list" id="agentList">
+      <!-- agent cards loaded dynamically -->
+    </div>
+
+    <div class="agent-panel-footer">
+      <button class="agent-collapse-btn" onclick="toggleAgentPanel()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        收起面板
+      </button>
+    </div>
+  </div>
 </div>
+
+<!-- Floating expand button for collapsed agent panel -->
+<button class="agent-expand-float hidden" id="agentExpandFloat" onclick="toggleAgentPanel()" title="展开 Agent 面板">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+</button>
 
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
+
+<!-- Agent Modal Container -->
+<div id="agentModalContainer"></div>
 
 <script>
 // ── State ──
@@ -427,11 +666,47 @@ const state = {
   isGenerating: false,
   abortController: null,
   systemStatus: null,
+  // ── Agent state ──
+  agents: [],            // [{name, model, description, soul, identity, avatar_color, avatar_emoji}]
+  activeAgent: 'default',
+  agentPanelOpen: true,
+  agentSessions: {},     // {agentName: [{id, name, messages, last}]}
+  agentDetails: {},      // {agentName: {soul, identity, model, ...}}
 };
+
+// ── Utility: deterministic color from agent name ──
+function hashStr(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+function getAgentColorClass(name) {
+  return 'agent-color-' + (hashStr(name) % 8);
+}
+
+function getAgentInitials(name) {
+  if (!name) return '?';
+  const parts = name.replace(/[-_]/g, ' ').split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return name.slice(0, 2).toUpperCase();
+}
+
+function getAgentGradient(name) {
+  const palettes = [
+    ['#6366f1','#8b5cf6'],['#ec4899','#f43f5e'],['#f59e0b','#f97316'],
+    ['#10b981','#059669'],['#3b82f6','#0ea5e9'],['#8b5cf6','#a855f7'],
+    ['#ef4444','#dc2626'],['#14b8a6','#06b6d4']
+  ];
+  const idx = hashStr(name) % palettes.length;
+  return `linear-gradient(135deg,${palettes[idx][0]},${palettes[idx][1]})`;
+}
 
 // ── Init ──
 document.addEventListener('DOMContentLoaded', () => {
-  loadSessions();
+  loadAgents();
   loadStatus();
   // Enable/disable send button
   document.getElementById('userInput').addEventListener('input', function() {
@@ -475,31 +750,356 @@ function showStatus() {
   alert(info);
 }
 
-// ── Sessions ──
+// ══════════════════════════════════════════════════════
+// ── Agent Management ──
+// ══════════════════════════════════════════════════════
+
+async function loadAgents() {
+  try {
+    const data = await api('/api/agents');
+    state.agents = (data || []).map(a => ({
+      name: a.name || 'default',
+      model: a.model || '',
+      description: a.description || '',
+      soul: a.soul || '',
+      identity: a.identity || '',
+      avatar_color: a.avatar_color || '',
+      avatar_emoji: a.avatar_emoji || '',
+    }));
+
+    // Ensure "default" exists
+    if (!state.agents.find(a => a.name === 'default')) {
+      state.agents.unshift({
+        name: 'default', model: '', description: '默认助手',
+        soul: '', identity: '', avatar_color: '', avatar_emoji: '🤖',
+      });
+    }
+
+    // Select default agent if none selected
+    if (!state.activeAgent || !state.agents.find(a => a.name === state.activeAgent)) {
+      state.activeAgent = 'default';
+    }
+
+    renderAgentList();
+    updateActiveAgentBadge();
+    await loadSessions();
+  } catch (e) {
+    // Offline fallback
+    state.agents = [{
+      name: 'default', model: '', description: '默认助手',
+      soul: '', identity: '', avatar_color: '', avatar_emoji: '🤖',
+    }];
+    state.activeAgent = 'default';
+    renderAgentList();
+    updateActiveAgentBadge();
+    await loadSessions();
+  }
+}
+
+async function loadAgentDetails(agentName) {
+  if (state.agentDetails[agentName]) return state.agentDetails[agentName];
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(agentName)}`);
+    state.agentDetails[agentName] = data || {};
+    return data;
+  } catch (e) {
+    return {};
+  }
+}
+
+function renderAgentList() {
+  const list = document.getElementById('agentList');
+  if (state.agents.length === 0) {
+    list.innerHTML = `
+      <div class="agent-empty">
+        <div class="agent-empty-icon">🤖</div>
+        <div class="agent-empty-text">暂无 Agent<br>点击上方 + 创建</div>
+      </div>`;
+    return;
+  }
+
+  list.innerHTML = state.agents.map(a => {
+    const isActive = a.name === state.activeAgent;
+    const initials = getAgentInitials(a.name);
+    const emoji = a.avatar_emoji || '';
+    const avatarContent = emoji || initials;
+    const colorStyle = a.avatar_color ? `background:${a.avatar_color}` : '';
+    const colorClass = a.avatar_color ? '' : getAgentColorClass(a.name);
+    const modelShort = (a.model || '').split('/').pop() || '';
+
+    return `
+      <div class="agent-card ${isActive ? 'active' : ''}"
+           onclick="selectAgent('${escapeHtml(a.name)}')">
+        <div class="agent-avatar ${colorClass}" style="${colorStyle}">
+          ${avatarContent}
+          <span class="status-dot"></span>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name">
+            ${escapeHtml(a.name)}
+            ${modelShort ? `<span class="model-tag">${escapeHtml(modelShort)}</span>` : ''}
+          </div>
+          ${a.description ? `<div class="agent-desc">${escapeHtml(a.description)}</div>` : ''}
+        </div>
+        <button class="agent-settings-btn" onclick="event.stopPropagation();showEditAgentModal('${escapeHtml(a.name)}')" title="Agent 设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>`;
+  }).join('');
+}
+
+async function selectAgent(agentName) {
+  if (agentName === state.activeAgent) return;
+  state.activeAgent = agentName;
+  state.activeSessionId = null;
+  state.messages = [];
+
+  // Update UI
+  renderAgentList();
+  updateActiveAgentBadge();
+
+  // Load sessions for this agent
+  await loadSessions();
+
+  // Load agent details and update welcome card
+  const details = await loadAgentDetails(agentName);
+  updateWelcomeCard(agentName, details);
+
+  // Show welcome
+  document.getElementById('headerTitle').textContent = '新对话';
+  renderMessages();
+  document.getElementById('userInput').focus();
+}
+
+function updateActiveAgentBadge() {
+  const badge = document.getElementById('activeAgentBadge');
+  const avatar = document.getElementById('badgeAvatar');
+  const name = document.getElementById('badgeName');
+  const agent = state.agents.find(a => a.name === state.activeAgent);
+
+  if (agent) {
+    const emoji = agent.avatar_emoji || '';
+    avatar.textContent = emoji || getAgentInitials(agent.name);
+    avatar.style.background = agent.avatar_color || getAgentGradient(agent.name);
+    avatar.style.borderRadius = '50%';
+    name.textContent = agent.name;
+    badge.style.display = 'inline-flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function updateWelcomeCard(agentName, details) {
+  const agent = state.agents.find(a => a.name === agentName);
+  const emojiEl = document.getElementById('welcomeEmoji');
+  const titleEl = document.getElementById('welcomeTitle');
+  const subEl = document.getElementById('welcomeSubtitle');
+
+  if (agent) {
+    emojiEl.textContent = agent.avatar_emoji || '👋';
+    titleEl.textContent = `你好，我是 ${agent.name}`;
+    const desc = agent.description || details?.identity || '你的 AI 助手';
+    subEl.textContent = desc;
+  }
+}
+
+function toggleAgentPanel() {
+  const panel = document.getElementById('agentPanel');
+  const floatBtn = document.getElementById('agentExpandFloat');
+  state.agentPanelOpen = !state.agentPanelOpen;
+  panel.classList.toggle('collapsed', !state.agentPanelOpen);
+  floatBtn.classList.toggle('hidden', state.agentPanelOpen);
+}
+
+// ── Agent Create/Edit Modal ──
+function showCreateAgentModal() {
+  showAgentModal(null);
+}
+
+async function showEditAgentModal(agentName) {
+  const details = await loadAgentDetails(agentName);
+  const agent = state.agents.find(a => a.name === agentName);
+  showAgentModal(agentName, { ...agent, ...details });
+}
+
+function showAgentModal(editName, data = {}) {
+  const isEdit = !!editName;
+  const name = data.name || '';
+  const model = data.model || '';
+  const description = data.description || '';
+  const soul = data.soul || '';
+  const identity = data.identity || '';
+  const avatar_emoji = data.avatar_emoji || '';
+
+  const emojis = ['🤖','🧠','💡','🎯','🔮','⚡','🌟','🎨','📝','🔧','🎭','🌐','🦊','🐱','🐶','🦁'];
+
+  const container = document.getElementById('agentModalContainer');
+  container.innerHTML = `
+    <div class="modal-overlay" onclick="if(event.target===this)closeAgentModal()">
+      <div class="agent-modal">
+        <h3>${isEdit ? '⚙️ 编辑 Agent' : '✨ 创建新 Agent'}</h3>
+        <p class="modal-subtitle">${isEdit ? `修改 ${escapeHtml(editName)} 的配置` : '配置一个新的 AI Agent'}</p>
+
+        <div class="agent-form-group">
+          <label>名称 *</label>
+          <input type="text" id="agentFormName" placeholder="例如: translator, coder, tutor" value="${escapeHtml(name)}" ${isEdit ? 'readonly style="opacity:.6;cursor:not-allowed"' : ''}>
+          <div class="hint">${isEdit ? '名称不可修改' : '使用英文小写，可用连字符'}</div>
+        </div>
+
+        <div class="agent-form-group">
+          <label>模型</label>
+          <input type="text" id="agentFormModel" placeholder="例如: openai/gpt-4o, anthropic/claude-3.5-sonnet" value="${escapeHtml(model)}">
+          <div class="hint">留空则使用系统默认模型</div>
+        </div>
+
+        <div class="agent-form-group">
+          <label>头像</label>
+          <div class="agent-avatar-picker" id="avatarPicker">
+            ${emojis.map(e => `
+              <div class="agent-avatar-option ${avatar_emoji === e ? 'selected' : ''}"
+                   onclick="pickAvatar(this,'${e}')" data-emoji="${e}">${e}</div>
+            `).join('')}
+          </div>
+          <input type="hidden" id="agentFormEmoji" value="${escapeHtml(avatar_emoji)}">
+        </div>
+
+        <div class="agent-form-group">
+          <label>简介</label>
+          <input type="text" id="agentFormDesc" placeholder="简短描述这个 Agent 的用途" value="${escapeHtml(description)}" maxlength="100">
+          <div class="hint">一句话描述，最多 100 字</div>
+        </div>
+
+        <div class="agent-form-group">
+          <label>Identity (身份)</label>
+          <textarea id="agentFormIdentity" placeholder="你是一个... 你擅长... 你的风格是..." rows="3">${escapeHtml(identity)}</textarea>
+          <div class="hint">定义 Agent 的身份和角色</div>
+        </div>
+
+        <div class="agent-form-group">
+          <label>Soul (灵魂/人格)</label>
+          <textarea id="agentFormSoul" placeholder="核心指令、行为准则、约束..." rows="4">${escapeHtml(soul)}</textarea>
+          <div class="hint">深层人格定义，影响 Agent 的思维方式</div>
+        </div>
+
+        <div class="agent-modal-actions">
+          ${isEdit ? `<button class="agent-modal-btn agent-modal-btn-delete" onclick="deleteAgent('${escapeHtml(editName)}')">🗑️ 删除</button>` : ''}
+          <button class="agent-modal-btn agent-modal-btn-cancel" onclick="closeAgentModal()">取消</button>
+          <button class="agent-modal-btn agent-modal-btn-primary" onclick="saveAgent('${escapeHtml(editName || '')}')">
+            ${isEdit ? '保存修改' : '创建 Agent'}
+          </button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function pickAvatar(el, emoji) {
+  document.querySelectorAll('.agent-avatar-option').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+  document.getElementById('agentFormEmoji').value = emoji;
+}
+
+function closeAgentModal() {
+  document.getElementById('agentModalContainer').innerHTML = '';
+}
+
+async function saveAgent(editName) {
+  const nameEl = document.getElementById('agentFormName');
+  const modelEl = document.getElementById('agentFormModel');
+  const descEl = document.getElementById('agentFormDesc');
+  const identityEl = document.getElementById('agentFormIdentity');
+  const soulEl = document.getElementById('agentFormSoul');
+  const emojiEl = document.getElementById('agentFormEmoji');
+
+  const isEdit = !!editName;
+  const name = isEdit ? editName : nameEl.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+
+  if (!name) { toast('请输入有效的 Agent 名称', 'error'); return; }
+  if (!isEdit && name.length < 2) { toast('名称至少 2 个字符', 'error'); return; }
+
+  const payload = {
+    name,
+    model: modelEl.value.trim(),
+    description: descEl.value.trim(),
+    identity: identityEl.value.trim(),
+    soul: soulEl.value.trim(),
+    avatar_emoji: emojiEl.value,
+  };
+
+  try {
+    if (isEdit) {
+      await api(`/api/agents/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      toast('Agent 已更新', 'success');
+    } else {
+      await api('/api/agents', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      toast('Agent 已创建', 'success');
+    }
+    closeAgentModal();
+    await loadAgents();
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'error');
+  }
+}
+
+async function deleteAgent(agentName) {
+  if (agentName === 'default') { toast('不能删除默认 Agent', 'error'); return; }
+  if (!confirm(`确定删除 Agent "${agentName}"？`)) return;
+  try {
+    await api(`/api/agents/${encodeURIComponent(agentName)}`, { method: 'DELETE' });
+    toast('Agent 已删除', 'success');
+    closeAgentModal();
+    if (state.activeAgent === agentName) {
+      state.activeAgent = 'default';
+    }
+    await loadAgents();
+  } catch (e) {
+    toast('删除失败: ' + e.message, 'error');
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// ── Sessions (scoped to active agent) ──
+// ══════════════════════════════════════════════════════
+
 async function loadSessions() {
   try {
-    const data = await api('/api/sessions');
+    const url = `/api/sessions?agent=${encodeURIComponent(state.activeAgent)}`;
+    const data = await api(url);
     state.sessions = (data || []).map(s => ({
       id: s.id,
       name: formatSessionName(s.id),
       messages: s.messages || 0,
       last: s.last || '',
     }));
-    // Add "new chat" option
-    if (state.sessions.length === 0 || state.sessions[0].id !== '__new__') {
-      state.sessions.unshift({ id: '__new__', name: '新对话', messages: 0, last: '' });
-    }
-    renderSessions();
+    // Cache per agent
+    state.agentSessions[state.activeAgent] = [...state.sessions];
   } catch (e) {
-    // Offline - use local sessions
-    state.sessions = [{ id: '__new__', name: '新对话', messages: 0, last: '' }];
-    renderSessions();
+    // Offline - try cache
+    state.sessions = state.agentSessions[state.activeAgent] || [];
+  }
+
+  // Add "new chat" option
+  if (state.sessions.length === 0 || state.sessions[0].id !== '__new__') {
+    state.sessions.unshift({ id: '__new__', name: '新对话', messages: 0, last: '' });
+  }
+
+  renderSessions();
+
+  // Auto-select most recent session if none selected
+  if (!state.activeSessionId && state.sessions.length > 1) {
+    selectSession(state.sessions[1].id);
   }
 }
 
 function formatSessionName(id) {
   if (id.startsWith('web_')) return id.replace('web_', '').replace(/_/g, ' ');
   if (id.startsWith('cli_')) return 'CLI: ' + id.replace('cli_', '');
+  // Strip agent prefix if present (e.g., "default_web_2024..." -> "web_2024...")
   return id.length > 20 ? id.slice(0, 20) + '...' : id;
 }
 
@@ -533,6 +1133,12 @@ function newChat() {
   state.activeSessionId = '__new__';
   state.messages = [];
   document.getElementById('headerTitle').textContent = '新对话';
+  const agent = state.agents.find(a => a.name === state.activeAgent);
+  if (agent) {
+    document.getElementById('welcomeEmoji').textContent = agent.avatar_emoji || '👋';
+    document.getElementById('welcomeTitle').textContent = `你好，我是 ${agent.name}`;
+    document.getElementById('welcomeSubtitle').textContent = agent.description || '你的 AI 助手';
+  }
   document.getElementById('welcomeCard').style.display = '';
   renderMessages();
   renderSessions();
@@ -591,11 +1197,13 @@ function clearCurrentChat() {
 function renderMessages() {
   const container = document.getElementById('messagesInner');
   if (state.messages.length === 0) {
-    container.innerHTML = document.getElementById('welcomeCard') ?
-      container.innerHTML : `
+    // Show welcome card
+    const agent = state.agents.find(a => a.name === state.activeAgent);
+    container.innerHTML = `
       <div class="welcome-card" id="welcomeCard">
-        <h2><span class="emoji">👋</span> 你好，我是 MyAgent</h2>
-        <p class="subtitle">本地桌面端执行型 AI 助手 — 我可以帮你写代码、搜索信息、管理文件等</p>
+        <h2><span class="emoji" id="welcomeEmoji">${agent ? (agent.avatar_emoji || '👋') : '👋'}</span>
+            <span id="welcomeTitle">你好，我是 ${agent ? escapeHtml(agent.name) : 'MyAgent'}</span></h2>
+        <p class="subtitle" id="welcomeSubtitle">${agent ? escapeHtml(agent.description || '你的 AI 助手') : '本地桌面端执行型 AI 助手 — 我可以帮你写代码、搜索信息、管理文件等'}</p>
         <div class="capabilities">
           <div class="capability"><span class="cap-icon">💻</span> 代码编写与执行</div>
           <div class="capability"><span class="cap-icon">🔍</span> 网络搜索与阅读</div>
@@ -611,10 +1219,13 @@ function renderMessages() {
   const welcomeCard = document.getElementById('welcomeCard');
   if (welcomeCard) welcomeCard.style.display = 'none';
 
+  const agent = state.agents.find(a => a.name === state.activeAgent);
+  const botEmoji = agent ? (agent.avatar_emoji || '🤖') : '🤖';
+
   let html = '';
   for (const msg of state.messages) {
     const isUser = msg.role === 'user';
-    const avatar = isUser ? '👤' : '🤖';
+    const avatar = isUser ? '👤' : botEmoji;
     const content = renderMarkdown(msg.content);
     html += `
       <div class="message-row ${msg.role}">
@@ -692,10 +1303,11 @@ async function sendMessage() {
   const text = input.value.trim();
   if (!text || state.isGenerating) return;
 
-  // Create session if needed
+  // Create session if needed (incorporate agent name)
   let sessionId = state.activeSessionId;
   if (!sessionId || sessionId === '__new__') {
-    sessionId = 'web_' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    sessionId = `${state.activeAgent}_web_${ts}`;
     state.activeSessionId = sessionId;
     document.getElementById('headerTitle').textContent = formatSessionName(sessionId);
   }
@@ -719,7 +1331,11 @@ async function sendMessage() {
     state.abortController = new AbortController();
     const data = await api('/api/chat', {
       method: 'POST',
-      body: JSON.stringify({ message: text, session_id: sessionId }),
+      body: JSON.stringify({
+        message: text,
+        session_id: sessionId,
+        agent_name: state.activeAgent,
+      }),
       signal: state.abortController.signal,
     });
 
@@ -743,6 +1359,8 @@ async function sendMessage() {
         last: new Date().toISOString(),
       });
     }
+    // Update cache
+    state.agentSessions[state.activeAgent] = [...state.sessions];
     renderSessions();
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -771,11 +1389,13 @@ function stopGenerating() {
 
 function showTypingIndicator() {
   const container = document.getElementById('messagesInner');
+  const agent = state.agents.find(a => a.name === state.activeAgent);
+  const botEmoji = agent ? (agent.avatar_emoji || '🤖') : '🤖';
   const el = document.createElement('div');
   el.className = 'typing-indicator';
   el.id = 'typingIndicator';
   el.innerHTML = `
-    <div class="message-avatar" style="background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-radius:8px;width:32px;height:32px;display:grid;place-items:center;font-size:14px">🤖</div>
+    <div class="message-avatar" style="background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-radius:8px;width:32px;height:32px;display:grid;place-items:center;font-size:14px">${botEmoji}</div>
     <div class="typing-bubble">
       <div class="typing-dot"></div>
       <div class="typing-dot"></div>
@@ -834,6 +1454,15 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === '/') {
     e.preventDefault();
     document.getElementById('userInput').focus();
+  }
+  // Ctrl/Cmd + ]: toggle agent panel
+  if ((e.ctrlKey || e.metaKey) && e.key === ']') {
+    e.preventDefault();
+    toggleAgentPanel();
+  }
+  // Escape: close agent modal
+  if (e.key === 'Escape') {
+    closeAgentModal();
   }
 });
 </script>

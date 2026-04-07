@@ -13,6 +13,14 @@ from core.logger import get_logger
 logger = get_logger("myagent.api")
 
 
+def _agent_color(name: str) -> str:
+    """Generate a consistent color for an agent based on its name."""
+    colors = ['#4f46e5','#7c3aed','#ec4899','#ef4444','#f59e0b','#10b981',
+              '#06b6d4','#3b82f6','#8b5cf6','#f97316','#14b8a6','#6366f1']
+    h = sum(ord(c) for c in name)
+    return colors[h % len(colors)]
+
+
 class ApiServer:
     def __init__(self, app_core):
         self.core = app_core
@@ -58,6 +66,7 @@ class ApiServer:
         r.add_get("/api/workdir/files", self.handle_list_workdir)
         r.add_get("/api/logs", self.handle_get_logs)
         r.add_get("/api/logs/stream", self.handle_log_stream)
+        r.add_get("/api/agents/{name}/sessions", self.handle_agent_sessions)
         r.add_post("/api/chat", self.handle_chat)
         r.add_get("/chat", self.handle_chat_page)
         ui_dir = Path(__file__).parent / "ui"
@@ -80,7 +89,9 @@ class ApiServer:
         if not message:
             return web.json_response({"error": "message is required"}, status=400)
 
-        session_id = data.get("session_id", "") or "web_default"
+        agent_name = data.get("agent_name", "default") or "default"
+        raw_session_id = data.get("session_id", "") or "web_default"
+        session_id = f"{agent_name}_{raw_session_id}"
 
         try:
             response = await self.core.process_message(message, session_id)
@@ -97,7 +108,7 @@ class ApiServer:
                     session_id=session_id, category="short_term",
                 ))
 
-            return web.json_response({"response": response, "session_id": session_id})
+            return web.json_response({"response": response, "session_id": session_id, "agent_name": agent_name})
         except Exception as e:
             logger.error(f"Chat error: {e}", exc_info=True)
             return web.json_response({"error": str(e)}, status=500)
@@ -132,25 +143,48 @@ class ApiServer:
         return self._agents_dir() / name
 
     async def handle_list_agents(self, request):
+        if not self.core.memory:
+            session_counts = {}
+        else:
+            rows = self.core.memory._get_conn().execute(
+                "SELECT session_id, COUNT(*) as cnt FROM memories "
+                "WHERE category='short_term' GROUP BY session_id").fetchall()
+            session_counts = {}
+            for r in rows:
+                sid = r["session_id"]
+                agent_part = sid.split("_")[0] if "_" in sid else "default"
+                session_counts[agent_part] = session_counts.get(agent_part, 0) + r["cnt"]
         agents = []
         for d in sorted(self._agents_dir().iterdir()):
             if d.is_dir() and (d / "config.json").exists():
                 cfg = json.loads((d / "config.json").read_text())
-                agents.append({"name": d.name, **cfg})
+                agent = {"name": d.name, **cfg}
+                agent["avatar_color"] = cfg.get("avatar_color") or _agent_color(d.name)
+                agent["session_count"] = session_counts.get(d.name, 0)
+                agents.append(agent)
         if not agents:
-            agents.append({"name": "default", "model": self.core.config.llm.model})
+            default_agent = {"name": "default", "model": self.core.config.llm.model,
+                            "avatar_color": _agent_color("default"), "session_count": session_counts.get("default", 0)}
+            agents.append(default_agent)
         return web.json_response(agents)
 
     async def handle_create_agent(self, request):
         data = await request.json()
         name = data.get("name", f"agent_{int(time.time())}")
         ad = self._agent_dir(name); ad.mkdir(parents=True, exist_ok=True)
-        cfg = {k: v for k, v in data.items() if k != "name"}
+        cfg = {k: v for k, v in data.items() if k not in ("name", "system_prompt")}
+        cfg.setdefault("avatar_color", _agent_color(name))
+        system_prompt = data.get("system_prompt", f"你是{name}，一个专业的AI助手。请用友好、专业的方式回答用户的问题。")
+        cfg.setdefault("system_prompt", system_prompt)
         (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        for fn, default in [("soul.md", f"# {name}\n\n## 性格\n专业AI助手\n"), ("identity.md", f"# {name}\n\n## 身份\nAI助手\n")]:
+        for fn, default in [
+            ("soul.md", f"# {name}\n\n## 性格\n专业AI助手\n"),
+            ("identity.md", f"# {name}\n\n## 身份\nAI助手\n"),
+            ("user.md", f"# {name} 用户信息\n\n## 用户偏好\n<!-- 在此处记录用户偏好 -->\n"),
+        ]:
             if not (ad / fn).exists():
                 (ad / fn).write_text(default)
-        return web.json_response({"ok": True, "name": name})
+        return web.json_response({"ok": True, "name": name, "avatar_color": cfg["avatar_color"]})
 
     async def handle_get_agent(self, request):
         name = request.match_info["name"]
@@ -261,10 +295,36 @@ class ApiServer:
     # --- Sessions ---
     async def handle_list_sessions(self, request):
         if not self.core.memory: return web.json_response([])
+        agent = request.query.get("agent", "")
+        if agent:
+            prefix = f"{agent}_"
+            rows = self.core.memory._get_conn().execute(
+                "SELECT DISTINCT session_id, COUNT(*) as cnt, MAX(created_at) as last FROM memories "
+                "WHERE category='short_term' AND session_id LIKE ? GROUP BY session_id ORDER BY last DESC LIMIT 100",
+                (prefix + "%",)).fetchall()
+        else:
+            rows = self.core.memory._get_conn().execute(
+                "SELECT DISTINCT session_id, COUNT(*) as cnt, MAX(created_at) as last FROM memories "
+                "WHERE category='short_term' GROUP BY session_id ORDER BY last DESC LIMIT 100").fetchall()
+        return web.json_response([{"id": r["session_id"], "messages": r["cnt"], "last": r["last"]} for r in rows])
+
+    async def handle_agent_sessions(self, request):
+        """GET /api/agents/{name}/sessions - Convenience endpoint for agent-scoped sessions."""
+        name = request.match_info["name"]
+        if not self.core.memory:
+            return web.json_response({"agent": name, "sessions": []})
+        prefix = f"{name}_"
         rows = self.core.memory._get_conn().execute(
             "SELECT DISTINCT session_id, COUNT(*) as cnt, MAX(created_at) as last FROM memories "
-            "WHERE category='short_term' GROUP BY session_id ORDER BY last DESC LIMIT 100").fetchall()
-        return web.json_response([{"id": r["session_id"], "messages": r["cnt"], "last": r["last"]} for r in rows])
+            "WHERE category='short_term' AND session_id LIKE ? GROUP BY session_id ORDER BY last DESC LIMIT 100",
+            (prefix + "%",)).fetchall()
+        sessions = [{"id": r["session_id"], "messages": r["cnt"], "last": r["last"]} for r in rows]
+        # Agent info
+        ad = self._agent_dir(name)
+        agent_info = {"name": name, "avatar_color": _agent_color(name)}
+        if (ad / "config.json").exists():
+            agent_info.update(json.loads((ad / "config.json").read_text()))
+        return web.json_response({**agent_info, "sessions": sessions})
 
     async def handle_get_messages(self, request):
         sid = request.match_info["sid"]
