@@ -5,6 +5,7 @@ skills/system_skill.py - 系统操作技能
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import subprocess
@@ -151,8 +152,8 @@ class CommandRunSkill(Skill):
                       work_dir: str = "", **kwargs) -> SkillResult:
         try:
             work_dir = work_dir or os.getcwd()
-            process = await asyncio_wait_for(
-                subprocess_exec(command, work_dir),
+            process = await asyncio.wait_for(
+                self._subprocess_exec(command, work_dir),
                 timeout=timeout,
             )
             return process
@@ -161,37 +162,28 @@ class CommandRunSkill(Skill):
         except Exception as e:
             return SkillResult(success=False, error=str(e))
 
+    async def _subprocess_exec(self, command: str, work_dir: str) -> SkillResult:
+        """执行子进程"""
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=work_dir,
+        )
+        stdout, stderr = await process.communicate()
+        stdout_str = stdout.decode("utf-8", errors="replace")
+        stderr_str = stderr.decode("utf-8", errors="replace")
 
-# 辅助函数 (避免在模块顶层使用 asyncio)
-import asyncio as _asyncio
-
-def asyncio_wait_for(coro, timeout):
-    """兼容的 wait_for"""
-    return _asyncio.wait_for(coro, timeout=timeout)
-
-
-async def subprocess_exec(command: str, work_dir: str) -> SkillResult:
-    """执行子进程"""
-    process = await _asyncio.create_subprocess_shell(
-        command,
-        stdout=_asyncio.subprocess.PIPE,
-        stderr=_asyncio.subprocess.PIPE,
-        cwd=work_dir,
-    )
-    stdout, stderr = await process.communicate()
-    stdout_str = stdout.decode("utf-8", errors="replace")
-    stderr_str = stderr.decode("utf-8", errors="replace")
-
-    return SkillResult(
-        success=process.returncode == 0,
-        data={
-            "exit_code": process.returncode,
-            "stdout": stdout_str,
-            "stderr": stderr_str,
-        },
-        message=stdout_str[:2000] if process.returncode == 0 else f"失败: {stderr_str[:500]}",
-        error=stderr_str if process.returncode != 0 else "",
-    )
+        return SkillResult(
+            success=process.returncode == 0,
+            data={
+                "exit_code": process.returncode,
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+            },
+            message=stdout_str[:2000] if process.returncode == 0 else f"失败: {stderr_str[:500]}",
+            error=stderr_str if process.returncode != 0 else "",
+        )
 
 
 class EnvironmentGetSkill(Skill):

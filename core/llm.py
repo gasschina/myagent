@@ -14,7 +14,6 @@ core/llm.py - LLM 客户端模块
 from __future__ import annotations
 
 import json
-import re
 import time
 import asyncio
 from typing import (
@@ -23,7 +22,7 @@ from typing import (
 from dataclasses import dataclass, field
 
 from core.logger import get_logger
-from core.utils import safe_json_parse, retry_async
+from core.utils import safe_json_parse
 
 logger = get_logger("myagent.llm")
 
@@ -696,53 +695,17 @@ class LLMClient:
     @staticmethod
     def _parse_json_strict(text: str) -> Any:
         """
-        使用 4 种策略严格解析 JSON 字符串。
-
-        策略:
-          1. 直接 json.loads()
-          2. 提取 markdown 代码块 (```json ... ```)
-          3. 提取第一个 { 到最后一个 } (正则)
-          4. 提取第一个 [ 到最后一个 ] (正则)
+        使用多策略严格解析 JSON 字符串。
+        复用 core.utils.safe_json_parse (3 策略: 直接/代码块/括号匹配)。
 
         Returns:
             解析后的 Python 对象，全部失败返回 None。
         """
         if not text:
             return None
-
-        # 策略 1: 直接解析
-        try:
-            return json.loads(text.strip())
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # 策略 2: 提取 ```json ... ``` 代码块
-        code_block_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
-        matches = re.findall(code_block_pattern, text, re.DOTALL)
-        for match in matches:
-            try:
-                return json.loads(match.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-        # 策略 3: 提取第一个 { 到最后一个 }
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
-        if first_brace != -1 and last_brace > first_brace:
-            try:
-                return json.loads(text[first_brace:last_brace + 1])
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # 策略 4: 提取第一个 [ 到最后一个 ]
-        first_bracket = text.find("[")
-        last_bracket = text.rfind("]")
-        if first_bracket != -1 and last_bracket > first_bracket:
-            try:
-                return json.loads(text[first_bracket:last_bracket + 1])
-            except (json.JSONDecodeError, ValueError):
-                pass
-
+        result = safe_json_parse(text)
+        if result is not None:
+            return result
         return None
 
     async def chat_json_strict(
@@ -873,45 +836,13 @@ class LLMClient:
     ) -> Dict[str, Any]:
         """
         发送聊天请求并解析为 JSON 对象。
-        自动添加 JSON 输出提示，并验证返回结构。
-
-        Args:
-            messages: 消息列表
-            required_fields: 必需字段列表
-            **kwargs: 额外参数
-
-        Returns:
-            解析后的字典
+        委托给 chat_json_strict() (更严格的 4 策略解析 + 重试)。
+        添加 response_format=json_object 以利用 OpenAI 兼容的 JSON mode。
         """
-        # 确保 system prompt 包含 JSON 输出指示
-        has_json_instruction = False
-        for m in messages:
-            if m.role == "system" and "json" in m.content.lower():
-                has_json_instruction = True
-                break
-
-        if not has_json_instruction:
-            json_prompt = "你必须以合法 JSON 格式回复，不要包含任何多余文本、解释或 markdown 标记。"
-            messages = [
-                Message(role="system", content=json_prompt),
-                *messages,
-            ]
-
-        kwargs["response_format"] = {"type": "json_object"}
-        response = await self.chat(messages, **kwargs)
-
-        if not response.success:
-            return {"error": response.error}
-
-        result = safe_json_parse(response.content, {"raw": response.content})
-        if required_fields and isinstance(result, dict):
-            from core.utils import validate_json_schema
-            valid, err = validate_json_schema(result, required_fields)
-            if not valid:
-                logger.warning(f"JSON 校验失败: {err}")
-                result["_validation_error"] = err
-
-        return result
+        kwargs.setdefault("response_format", {"type": "json_object"})
+        return await self.chat_json_strict(
+            messages, required_fields=required_fields, max_retries=1, **kwargs
+        )
 
 
 # ==============================================================================

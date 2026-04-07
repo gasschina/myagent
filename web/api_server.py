@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Optional
 from aiohttp import web
 from core.logger import get_logger
+from core.llm import Message
+import datetime
 
 logger = get_logger("myagent.api")
 
@@ -72,6 +74,11 @@ class ApiServer:
         r.add_get("/api/logs/stream", self.handle_log_stream)
         r.add_post("/api/chat", self.handle_chat)
         r.add_get("/chat", self.handle_chat_page)
+        # ── 配置管理 (热重载/导入/导出) ──
+        r.add_get("/api/config", self.handle_get_config)
+        r.add_post("/api/config/reload", self.handle_reload_config)
+        r.add_post("/api/config/export", self.handle_export_config)
+        r.add_post("/api/config/import", self.handle_import_config)
         ui_dir = Path(__file__).parent / "ui"
         if ui_dir.exists():
             r.add_static("/ui", str(ui_dir))
@@ -103,15 +110,12 @@ class ApiServer:
 
             # 保存到记忆
             if self.core.memory:
-                from memory.manager import MemoryEntry
-                self.core.memory.add(MemoryEntry(
-                    role="user", content=message,
-                    session_id=session_id, category="short_term",
-                ))
-                self.core.memory.add(MemoryEntry(
-                    role="assistant", content=response,
-                    session_id=session_id, category="short_term",
-                ))
+                self.core.memory.add_short_term(
+                    session_id=session_id, role="user", content=message,
+                )
+                self.core.memory.add_short_term(
+                    session_id=session_id, role="assistant", content=response,
+                )
 
             return web.json_response({"response": response, "session_id": session_id, "agent_name": agent_path, "agent_path": agent_path})
         except Exception as e:
@@ -481,7 +485,10 @@ class ApiServer:
             if k in data:
                 exe[k] = data[k]
         cfg_path.write_text(json.dumps(cfg_data, indent=2, ensure_ascii=False))
-        # 实时切换
+        # 热更新内存配置
+        update_keys = {k: v for k, v in data.items() if hasattr(self.core.config_mgr.config.executor, k)}
+        self.core.config_mgr.update_executor(**update_keys)
+        # 实时切换执行引擎
         if self.core.executor and "execution_mode" in data:
             mode = data["execution_mode"]
             ok = self.core.executor.set_execution_mode(mode)
@@ -493,7 +500,8 @@ class ApiServer:
                 self.core.executor.sandbox_memory = data["sandbox_memory"]
             if not ok:
                 return web.json_response({"ok": False, "error": f"切换到 {mode} 失败(Docker 不可用)"})
-        return web.json_response({"ok": True})
+        logger.info(f"执行引擎配置已热更新: mode={data.get('execution_mode')}")
+        return web.json_response({"ok": True, "hot_reload": True})
 
     # --- Platforms ---
     async def handle_list_platforms(self, request):
@@ -590,6 +598,7 @@ class ApiServer:
 
     async def handle_update_llm(self, request):
         data = await request.json()
+        # 1. 写入文件
         cfg_path = self.core.config_mgr._config_file
         cfg_data = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
         llm = cfg_data.setdefault("llm", {})
@@ -597,12 +606,28 @@ class ApiServer:
             if k in data: llm[k] = data[k]
         if data.get("api_key"): llm["api_key"] = data["api_key"]
         cfg_path.write_text(json.dumps(cfg_data, indent=2, ensure_ascii=False))
-        return web.json_response({"ok": True})
+        # 2. 热更新内存中的配置
+        update_keys = {k: v for k, v in data.items() if k != "api_key" or data.get("api_key")}
+        self.core.config_mgr.update_llm(**update_keys)
+        # 3. 实时更新 LLM 客户端
+        if self.core.llm:
+            new_cfg = self.core.config_mgr.config.llm
+            self.core.llm.provider = new_cfg.provider
+            self.core.llm.model = new_cfg.model
+            self.core.llm.base_url = new_cfg.base_url
+            self.core.llm.temperature = new_cfg.temperature
+            self.core.llm.max_tokens = new_cfg.max_tokens
+            self.core.llm.timeout = new_cfg.timeout
+            self.core.llm.max_retries = new_cfg.max_retries
+            if data.get("api_key"):
+                self.core.llm.api_key = data["api_key"]
+        logger.info(f"LLM 配置已热更新: provider={data.get('provider')}, model={data.get('model')}")
+        return web.json_response({"ok": True, "hot_reload": True})
 
     async def handle_test_llm(self, request):
         try:
-            msg = await self.core.llm.chat([{"role": "user", "content": "Hi, reply OK"}])
-            return web.json_response({"ok": True, "response": msg.choices[0].message.content[:100]})
+            msg = await self.core.llm.chat([Message(role="user", content="Hi, reply OK")])
+            return web.json_response({"ok": True, "response": msg.content[:100] if msg.content else ""})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)})
 
@@ -676,6 +701,122 @@ class ApiServer:
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError: pass
         return resp
+
+    # ── 配置管理 (热重载 / 导入 / 导出) ──
+    async def handle_get_config(self, request):
+        """GET /api/config - 获取完整配置（敏感字段脱敏）"""
+        cfg = self.core.config_mgr.get_full_config()
+        return web.json_response(cfg)
+
+    async def handle_reload_config(self, request):
+        """POST /api/config/reload - 从配置文件热重载（无需重启）"""
+        try:
+            old_provider = self.core.config_mgr.config.llm.provider
+            old_model = self.core.config_mgr.config.llm.model
+
+            # 重新加载配置文件
+            new_config = self.core.config_mgr.reload()
+            logger.info("配置已热重载")
+
+            # 更新运行中的组件
+            changes = []
+            if self.core.llm:
+                llm_cfg = new_config.llm
+                self.core.llm.provider = llm_cfg.provider
+                self.core.llm.model = llm_cfg.model
+                self.core.llm.base_url = llm_cfg.base_url
+                self.core.llm.api_key = llm_cfg.api_key
+                self.core.llm.temperature = llm_cfg.temperature
+                self.core.llm.max_tokens = llm_cfg.max_tokens
+                self.core.llm.timeout = llm_cfg.timeout
+                self.core.llm.max_retries = llm_cfg.max_retries
+                self.core.llm.anthropic_api_key = llm_cfg.anthropic_api_key
+                if llm_cfg.provider != old_provider or llm_cfg.model != old_model:
+                    changes.append(f"LLM: {old_provider}/{old_model} -> {llm_cfg.provider}/{llm_cfg.model}")
+
+            if self.core.executor:
+                exe_cfg = new_config.executor
+                self.core.executor.timeout = exe_cfg.timeout
+                self.core.executor.max_retries = exe_cfg.max_retries
+                self.core.executor.auto_fix = exe_cfg.auto_fix
+                self.core.executor.max_output_length = exe_cfg.max_output_length
+                if exe_cfg.sandbox_image:
+                    self.core.executor.sandbox_image = exe_cfg.sandbox_image
+                if exe_cfg.execution_mode:
+                    self.core.executor.set_execution_mode(exe_cfg.execution_mode)
+
+            # 更新 app 引用
+            self.core.config = new_config
+
+            logger.info(f"热重载完成，变更: {changes or '无显著变更'}")
+            return web.json_response({
+                "ok": True,
+                "message": "配置已热重载",
+                "changes": changes,
+                "config": self.core.config_mgr.get_full_config(),
+            })
+        except Exception as e:
+            logger.error(f"热重载失败: {e}", exc_info=True)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def handle_export_config(self, request):
+        """POST /api/config/export - 导出配置为 JSON 文件下载"""
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        include_secrets = data.get("include_secrets", False)
+
+        try:
+            export_data = self.core.config_mgr.export_config(include_secrets=include_secrets)
+            filename = f"myagent_config_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+            resp = web.Response(
+                body=json.dumps(export_data, ensure_ascii=False, indent=2),
+                content_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename=\"{filename}\"",
+                },
+            )
+            logger.info(f"配置已导出: {filename} (secrets={include_secrets})")
+            return resp
+        except Exception as e:
+            logger.error(f"导出配置失败: {e}", exc_info=True)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def handle_import_config(self, request):
+        """POST /api/config/import - 从上传的 JSON 导入配置"""
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "无效的 JSON 数据"}, status=400)
+
+        overwrite = data.get("_overwrite", False) if isinstance(data, dict) else False
+
+        try:
+            result = self.core.config_mgr.import_config(data, overwrite=overwrite)
+            if not result["ok"]:
+                return web.json_response(result, status=400)
+
+            # 热重载运行中的组件
+            new_config = self.core.config_mgr.config
+            if self.core.llm:
+                llm_cfg = new_config.llm
+                self.core.llm.provider = llm_cfg.provider
+                self.core.llm.model = llm_cfg.model
+                self.core.llm.base_url = llm_cfg.base_url
+                self.core.llm.api_key = llm_cfg.api_key
+                self.core.llm.temperature = llm_cfg.temperature
+                self.core.llm.max_tokens = llm_cfg.max_tokens
+                self.core.llm.timeout = llm_cfg.timeout
+                self.core.llm.max_retries = llm_cfg.max_retries
+            self.core.config = new_config
+
+            logger.info(f"配置已导入: {result['message']}")
+            return web.json_response(result)
+        except Exception as e:
+            logger.error(f"导入配置失败: {e}", exc_info=True)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def start(self, port: int = 8765):
         self._runner = web.AppRunner(self.app)

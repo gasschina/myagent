@@ -280,6 +280,123 @@ class ConfigManager:
         """获取所有启用的聊天平台"""
         return [cp for cp in self._config.chat_platforms if cp.enabled]
 
+    # ── 热重载 ──
+    def reload(self) -> AppConfig:
+        """从配置文件重新加载配置(热重载，不重启服务)"""
+        old_config = self._config
+        self._config = AppConfig()
+        self._load_from_file()
+        self._load_from_env()
+        self._apply_defaults()
+        return self._config
+
+    def update_llm(self, **kwargs) -> AppConfig:
+        """更新 LLM 配置并立即生效"""
+        for k, v in kwargs.items():
+            if hasattr(self._config.llm, k):
+                setattr(self._config.llm, k, v)
+        self.save()
+        return self._config
+
+    def update_executor(self, **kwargs) -> AppConfig:
+        """更新执行引擎配置并立即生效"""
+        for k, v in kwargs.items():
+            if hasattr(self._config.executor, k):
+                setattr(self._config.executor, k, v)
+        self.save()
+        return self._config
+
+    # ── 导入 / 导出 ──
+    def export_config(self, include_secrets: bool = False) -> dict:
+        """导出完整配置为字典（含备份元数据）"""
+        cfg = self._to_dict(self._config)
+        if not include_secrets:
+            # 脱敏处理
+            if 'api_key' in cfg.get('llm', {}):
+                key = cfg['llm']['api_key']
+                if key:
+                    cfg['llm']['api_key'] = key[:6] + '****' + key[-4:] if len(key) > 10 else '****'
+            if 'anthropic_api_key' in cfg.get('llm', {}):
+                key = cfg['llm']['anthropic_api_key']
+                if key:
+                    cfg['llm']['anthropic_api_key'] = key[:6] + '****' + key[-4:] if len(key) > 10 else '****'
+            # 脱敏聊天平台 token
+            for p in cfg.get('chat_platforms', []):
+                if p.get('token'):
+                    t = p['token']
+                    p['token'] = t[:6] + '****' + t[-4:] if len(t) > 10 else '****'
+                if p.get('app_secret'):
+                    s = p['app_secret']
+                    p['app_secret'] = s[:6] + '****' + s[-4:] if len(s) > 10 else '****'
+
+        result = {
+            '_meta': {
+                'version': '1.0',
+                'exported_at': __import__('datetime').datetime.now().isoformat(),
+                'hostname': platform.node(),
+                'include_secrets': include_secrets,
+ },
+            'config': cfg,
+        }
+        return result
+
+    def import_config(self, data: dict, overwrite: bool = False) -> dict:
+        """
+        导入配置。
+
+        Args:
+            data: 导入的配置字典（含 _meta 和 config）
+            overwrite: 是否完全覆盖（否则合并）
+
+        Returns:
+            dict: {ok, message, changed_keys}
+        """
+        if isinstance(data, dict) and 'config' in data:
+            cfg_data = data['config']
+        elif isinstance(data, dict):
+            cfg_data = data
+        else:
+            return {'ok': False, 'message': '无效的配置格式'}
+
+        # 验证基本结构
+        if not isinstance(cfg_data, dict):
+            return {'ok': False, 'message': '配置数据必须是字典'}
+
+        changed = []
+        if overwrite:
+            # 完全覆盖
+            self._config = AppConfig()
+            self._apply_dict(self._config, cfg_data)
+            changed = list(cfg_data.keys())
+        else:
+            # 合并模式：只覆盖有意义的字段
+            for section, fields in cfg_data.items():
+                if section.startswith('_'):
+                    continue
+                current = getattr(self._config, section, None)
+                if current is None or not hasattr(current, '__dataclass_fields__'):
+                    continue
+                if isinstance(fields, dict):
+                    for k, v in fields.items():
+                        if hasattr(current, k):
+                            old_val = getattr(current, k)
+                            if old_val != v:
+                                setattr(current, k, v)
+                                changed.append(f"{section}.{k}")
+
+        # 保存并应用默认值
+        self._apply_defaults()
+        self.save()
+        return {
+            'ok': True,
+            'message': f'配置已导入（{len(changed)} 项变更）',
+            'changed_keys': changed,
+        }
+
+    def get_full_config(self) -> dict:
+        """获取完整配置字典（敏感字段脱敏）"""
+        return self.export_config(include_secrets=False)
+
 
 # ==============================================================================
 # 全局配置实例

@@ -9,6 +9,7 @@ import asyncio
 from typing import Optional, List
 
 from core.logger import get_logger
+from core.utils import truncate_str
 from skills.base import Skill, SkillResult, SkillParameter
 
 logger = get_logger("myagent.skills.search")
@@ -155,7 +156,7 @@ class WebReadSkill(Skill):
                     tag.decompose()
                 text = soup.get_text(separator="\n", strip=True)
                 text = "\n".join(line for line in text.split("\n") if line.strip())
-                content = truncate_text(text, 20000)
+                content = truncate_str(text, 20000)
             else:
                 content = html[:50000]
 
@@ -225,8 +226,3 @@ class URLReadSkill(Skill):
         except Exception as e:
             return SkillResult(success=False, error=f"请求失败: {e}")
 
-
-def truncate_text(text: str, max_length: int) -> str:
-    if len(text) <= max_length:
-        return text
-    return text[:max_length] + f"\n... [截断，共 {len(text)} 字符]"

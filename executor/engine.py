@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.logger import get_logger
-from core.utils import timestamp, truncate_str, format_execution_result, detect_platform
+from core.utils import timestamp, truncate_str, detect_platform
 
 logger = get_logger("myagent.executor")
 
