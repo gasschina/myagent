@@ -1,0 +1,111 @@
+# ============================================================
+# MyAgent 配置文件
+# 复制此文件为 config.yaml 并修改配置项
+# ============================================================
+
+# 应用配置
+app:
+  name: MyAgent
+  version: "1.0.0"
+  log_level: INFO                    # DEBUG / INFO / WARNING / ERROR
+  log_file: logs/myagent.log
+  data_dir: data                     # 数据存储目录
+  max_log_size_mb: 50
+  log_backup_count: 5
+
+# LLM 配置
+llm:
+  provider: openai                   # openai / zhipu / custom
+  api_key: "your-api-key-here"       # 填入你的 API Key
+  api_base: "https://api.openai.com/v1"
+  model: gpt-4o                      # 模型名称
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 120                       # 请求超时秒数
+  max_retries: 3
+  retry_delay: 5
+
+  # 智谱AI 配置示例:
+  # provider: zhipu
+  # api_key: "your-zhipu-key"
+  # api_base: "https://open.bigmodel.cn/api/paas/v4"
+  # model: glm-4
+
+# 记忆系统配置
+memory:
+  db_path: data/myagent.db           # SQLite 数据库路径
+  max_short_term_messages: 50        # 短期记忆最大消息数
+  max_working_memory_items: 200      # 工作记忆最大条目数
+  auto_summarize_threshold: 40       # 自动摘要阈值
+  long_term_similarity_threshold: 0.7
+
+# 执行引擎配置
+executor:
+  timeout: 300                       # 单次执行超时秒数
+  max_retries: 3                     # 最大重试次数
+  auto_fix_attempts: 2               # 自动修复尝试次数
+  work_dir: ""                       # 默认工作目录 (空=当前目录)
+  blocked_commands:                  # 被阻止的命令列表
+    - "rm -rf /"
+    - "del /f /s /q C:\\"
+    - "format"
+    - "mkfs"
+    - "shutdown"
+    - "reboot"
+    - "halt"
+    - "poweroff"
+  python_path: python3               # Python 解释器路径
+  max_output_length: 50000           # 输出最大字符数
+
+# Agent 配置
+agent:
+  max_plan_steps: 20                 # 计划最大步骤数
+  max_tool_calls_per_step: 5         # 每步最大工具调用数
+  execution_loop_max: 50             # 执行循环最大次数
+  thinking_budget: 3                 # 每步最大思考次数
+
+# 聊天平台配置
+chatbot:
+  telegram:
+    enabled: false                   # 是否启用 Telegram
+    bot_token: ""                    # Bot Token (从 @BotFather 获取)
+    allowed_users: []                # 允许的用户ID列表 (空=允许所有)
+    poll_interval: 1.0
+
+  discord:
+    enabled: false                   # 是否启用 Discord
+    bot_token: ""                    # Bot Token
+    allowed_channels: []             # 允许的频道ID列表
+    allowed_users: []                # 允许的用户ID列表
+
+  feishu:
+    enabled: false                   # 是否启用飞书
+    app_id: ""                       # 应用 ID
+    app_secret: ""                   # 应用密钥
+    verification_token: ""           # 验证 Token
+    encrypt_key: ""                  # 加密 Key
+
+  qq:
+    enabled: false                   # 是否启用 QQ
+    bot_appid: ""                    # 机器人 AppID
+    bot_token: ""                    # 机器人 Token
+    sandbox: true                    # 沙箱模式
+
+  wechat:
+    enabled: false                   # 是否启用微信
+    api_url: ""                      # 微信 HTTP API 地址
+    api_token: ""                    # API Token
+    allowed_users: []                # 允许的用户列表
+
+# 技能系统配置
+skills:
+  enabled: true
+  search_engine: duckduckgo
+  browser_headless: true
+  max_file_size_mb: 100
+
+# 系统托盘配置
+tray:
+  auto_start: false                  # 开机自启 (需额外配置)
+  show_notifications: true
+  icon_path: ""

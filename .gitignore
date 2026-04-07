@@ -1,0 +1,30 @@
+# 忽略文件
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 数据目录
+data/
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 用户本地配置 (包含真实 API Key)
+# config.yaml  # 取消注释以忽略本地配置
+config.local.yaml
+
+# 打包
+*.spec

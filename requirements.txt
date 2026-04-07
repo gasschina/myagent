@@ -1,0 +1,17 @@
+# MyAgent 依赖清单
+# Python 3.8+
+
+# 配置文件解析
+pyyaml>=6.0
+
+# 系统托盘
+pystray>=0.19.0
+
+# 图标生成 (托盘图标)
+Pillow>=9.0.0
+
+# WebSocket (Discord / QQ Bot)
+websocket-client>=1.6.0
+
+# 打包工具 (开发依赖)
+# pyinstaller>=5.0
