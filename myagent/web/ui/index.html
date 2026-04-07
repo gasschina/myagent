@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MyAgent 管理后台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--surface:#1a1d27;--surface2:#232733;--border:#2e3347;--text:#e1e4ed;--text2:#8b92a5;--primary:#6366f1;--primary-h:#818cf8;--success:#22c55e;--warn:#f59e0b;--danger:#ef4444;--info:#3b82f6;--radius:8px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex}
+.sidebar{width:220px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar .logo{padding:20px;font-size:18px;font-weight:700;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.sidebar .logo span{color:var(--primary)}
+.nav{flex:1;padding:8px;overflow-y:auto}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--radius);cursor:pointer;color:var(--text2);font-size:14px;transition:all .15s;margin-bottom:2px}
+.nav-item:hover{background:var(--surface2);color:var(--text)}
+.nav-item.active{background:var(--primary);color:#fff}
+.nav-item .icon{width:20px;text-align:center;font-size:16px}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--surface)}
+.header h2{font-size:18px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--success);display:inline-block;margin-right:8px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.content{flex:1;padding:24px;overflow-y:auto}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+.card h3{font-size:15px;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.stat{background:var(--surface2);padding:16px;border-radius:var(--radius)}
+.stat .label{font-size:12px;color:var(--text2);margin-bottom:4px}
+.stat .value{font-size:28px;font-weight:700}
+input,select,textarea{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:14px;width:100%;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--primary)}
+textarea{font-family:'Cascadia Code',Consolas,monospace;resize:vertical;min-height:100px}
+.btn{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary{background:var(--primary);color:#fff}.btn-primary:hover{background:var(--primary-h)}
+.btn-success{background:var(--success);color:#fff}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border)}.btn-ghost:hover{background:var(--surface2)}
+.btn-sm{padding:4px 10px;font-size:12px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);font-size:13px}
+th{color:var(--text2);font-weight:600;font-size:12px}
+tr:hover{background:var(--surface2)}
+.badge{padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.badge-green{background:#22c55e22;color:var(--success)}
+.badge-red{background:#ef444422;color:var(--danger)}
+.badge-yellow{background:#f59e0b22;color:var(--warn)}
+.form-group{margin-bottom:14px}
+.form-group label{display:block;font-size:13px;color:var(--text2);margin-bottom:4px}
+.tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0}
+.tab{padding:8px 16px;cursor:pointer;font-size:13px;color:var(--text2);border-bottom:2px solid transparent}
+.tab.active{color:var(--primary);border-color:var(--primary)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:90%;max-width:600px;max-height:80vh;overflow-y:auto}
+.modal h3{margin-bottom:16px}
+.log-viewer{background:#0a0c10;border:1px solid var(--border);border-radius:var(--radius);padding:12px;font-family:monospace;font-size:12px;line-height:1.6;max-height:500px;overflow-y:auto;white-space:pre-wrap;color:#a0a8c0}
+.log-viewer .INFO{color:#22c55e}.log-viewer .WARNING{color:#f59e0b}.log-viewer .ERROR{color:#ef4444}.log-viewer .DEBUG{color:#6366f1}
+.hidden{display:none!important}
+.flex{display:flex}.gap-8{gap:8px}.gap-12{gap:12px}.items-center{align-items:center}.justify-between{justify-content:space-between}.flex-1{flex:1}
+.mt-8{margin-top:8px}.mt-16{margin-top:16px}.mb-8{margin-bottom:8px}.mb-16{margin-bottom:16px}
+.tag{display:inline-block;padding:2px 6px;background:var(--surface2);border-radius:4px;font-size:11px;color:var(--text2);margin:2px}
+.empty{text-align:center;color:var(--text2);padding:40px;font-size:14px}
+</style>
+</head>
+<body>
+<div class="sidebar">
+  <div class="logo"><span>🤖</span> MyAgent</div>
+  <div class="nav">
+    <div class="nav-item active" onclick="showPage('dashboard')"><span class="icon">📊</span>仪表盘</div>
+    <div class="nav-item" onclick="showPage('agents')"><span class="icon">🧠</span>Agent 管理</div>
+    <div class="nav-item" onclick="showPage('platforms')"><span class="icon">💬</span>聊天平台</div>
+    <div class="nav-item" onclick="showPage('sessions')"><span class="icon">📂</span>会话管理</div>
+    <div class="nav-item" onclick="showPage('memory')"><span class="icon">🧠</span>记忆管理</div>
+    <div class="nav-item" onclick="showPage('llm')"><span class="icon">⚙️</span>大模型设置</div>
+    <div class="nav-item" onclick="showPage('skills')"><span class="icon">🛠</span>插件管理</div>
+    <div class="nav-item" onclick="showPage('files')"><span class="icon">📁</span>工作目录</div>
+    <div class="nav-item" onclick="showPage('logs')"><span class="icon">📋</span>查看日志</div>
+  </div>
+  <div style="padding:12px;border-top:1px solid var(--border);font-size:12px;color:var(--text2)">
+    v1.0.0 · <a href="#" onclick="api('/api/status').then(r=>alert('Running: '+r.running))">状态</a>
+  </div>
+</div>
+<div class="main">
+  <div class="header"><h2 id="pageTitle">📊 仪表盘</h2><div><span class="status-dot"></span>运行中</div></div>
+  <div class="content" id="content"></div>
+</div>
+<div id="modalContainer"></div>
+
+<script>
+const API='';const pages={dashboard:'📊 仪表盘',agents:'🧠 Agent 管理',platforms:'💬 聊天平台',sessions:'📂 会话管理',memory:'🧠 记忆管理',llm:'⚙️ 大模型设置',skills:'🛠 插件管理',files:'📁 工作目录',logs:'📋 查看日志'};
+let currentPage='dashboard';
+
+async function api(url,opts={}){const r=await fetch(API+url,{headers:{'Content-Type':'application/json'},...opts});return r.json()}
+function $(id){return document.getElementById(id)}
+function showPage(page){
+  currentPage=page;
+  document.querySelectorAll('.nav-item').forEach((n,i)=>n.classList.toggle('active',Object.keys(pages)[i]===page));
+  $('pageTitle').textContent=pages[page]||page;
+  const renderers={dashboard:renderDashboard,agents:renderAgents,platforms:renderPlatforms,sessions:renderSessions,memory:renderMemory,llm:renderLLM,skills:renderSkills,files:renderFiles,logs:renderLogs};
+  if(renderers[page])renderers[page]();
+}
+
+// ========== Dashboard ==========
+async function renderDashboard(){
+  const s=await api('/api/status');const m=await api('/api/memory/stats');const sk=await api('/api/skills');
+  $('content').innerHTML=`<div class="grid">
+    <div class="stat"><div class="label">LLM</div><div class="value">${s.provider}/${s.model}</div></div>
+    <div class="stat"><div class="label">记忆条目</div><div class="value">${m.total_count||0}</div></div>
+    <div class="stat"><div class="label">已注册技能</div><div class="value">${s.skills||sk.length||0}</div></div>
+    <div class="stat"><div class="label">会话数</div><div class="value">${m.session_count||0}</div></div>
+    <div class="stat"><div class="label">任务队列</div><div class="value">${s.queue?.total_submitted||0} 提交</div></div>
+    <div class="stat"><div class="label">短期记忆</div><div class="value">${m.short_term_count||0}</div></div>
+    <div class="stat"><div class="label">工作记忆</div><div class="value">${m.working_count||0}</div></div>
+    <div class="stat"><div class="label">长期记忆</div><div class="value">${m.long_term_count||0}</div></div>
+  </div>`;
+}
+
+// ========== Agents ==========
+async function renderAgents(){
+  const agents=await api('/api/agents');
+  let html='<div class="flex justify-between mb-16"><div></div><button class="btn btn-primary" onclick="createAgent()">+ 新建 Agent</button></div>';
+  html+='<div class="grid">';
+  for(const a of agents){
+    const desc=a.description||a.system_prompt||'默认助手';
+    html+=`<div class="card" style="cursor:pointer" onclick="editAgent('${a.name}')">
+      <h3 style="color:var(--text)">${a.name}</h3>
+      <p style="font-size:13px;color:var(--text2);margin:8px 0">${desc.slice(0,80)}${desc.length>80?'...':''}</p>
+      <div class="flex gap-8 mt-8">
+        <span class="tag">${a.model||'default'}</span>
+        <span class="tag">${a.provider||'openai'}</span>
+      </div>
+    </div>`;
+  }
+  html+='</div>';
+  $('content').innerHTML=html;
+}
+
+function createAgent(){
+  const name=prompt('Agent 名称:');if(!name)return;
+  api('/api/agents',{method:'POST',body:JSON.stringify({name,description:'新 Agent'})}).then(()=>renderAgents());
+}
+
+async function editAgent(name){
+  const a=await api(`/api/agents/${name}`);
+  $('modalContainer').innerHTML=`<div class="modal-overlay" onclick="closeModal()"><div class="modal" onclick="event.stopPropagation()">
+    <h3>🧠 ${a.name}</h3>
+    <div class="tabs">
+      <div class="tab active" onclick="agentTab(this,'agentTabConfig')">配置</div>
+      <div class="tab" onclick="agentTab(this,'agentTabSoul')">Soul.md</div>
+      <div class="tab" onclick="agentTab(this,'agentTabIdentity')">Identity.md</div>
+    </div>
+    <div id="agentTabConfig">
+      <div class="form-group"><label>模型</label><input id="agModel" value="${a.model||''}"></div>
+      <div class="form-group"><label>Provider</label><select id="agProvider"><option ${a.provider==='openai'?'selected':''}>openai</option><option ${a.provider==='anthropic'?'selected':''}>anthropic</option><option ${a.provider==='ollama'?'selected':''}>ollama</option><option ${a.provider==='zhipu'?'selected':''}>zhipu</option></select></div>
+      <div class="form-group"><label>描述</label><textarea id="agDesc" rows="2">${a.description||''}</textarea></div>
+      <div class="form-group"><label>系统提示</label><textarea id="agSystem" rows="4">${a.system_prompt||''}</textarea></div>
+      <div class="flex gap-8 mt-16">
+        <button class="btn btn-primary" onclick="saveAgent('${name}')">保存</button>
+        <button class="btn btn-danger" onclick="deleteAgent('${name}')">删除</button>
+        <button class="btn btn-ghost" onclick="closeModal()">关闭</button>
+      </div>
+    </div>
+    <div id="agentTabSoul" class="hidden">
+      <textarea id="agSoul" rows="15" style="min-height:300px">${a.soul||''}</textarea>
+      <div class="flex gap-8 mt-8"><button class="btn btn-primary" onclick="saveSoul('${name}')">保存 Soul.md</button></div>
+    </div>
+    <div id="agentTabIdentity" class="hidden">
+      <textarea id="agIdentity" rows="15" style="min-height:300px">${a.identity||''}</textarea>
+      <div class="flex gap-8 mt-8"><button class="btn btn-primary" onclick="saveIdentity('${name}')">保存 Identity.md</button></div>
+    </div>
+  </div></div>`;
+}
+
+function agentTab(el,tabId){
+  el.parentElement.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  ['agentTabConfig','agentTabSoul','agentTabIdentity'].forEach(id=>{
+    $(id).classList.toggle('hidden',id!==tabId);
+  });
+}
+
+async function saveAgent(name){
+  await api(`/api/agents/${name}`,{method:'PUT',body:JSON.stringify({
+    model:$('agModel').value,provider:$('agProvider').value,
+    description:$('agDesc').value,system_prompt:$('agSystem').value
+  })});alert('已保存');renderAgents();
+}
+async function saveSoul(name){await api(`/api/agents/${name}/soul`,{method:'PUT',body:JSON.stringify({soul:$('agSoul').value})});alert('Soul.md 已保存')}
+async function saveIdentity(name){await api(`/api/agents/${name}/identity`,{method:'PUT',body:JSON.stringify({identity:$('agIdentity').value})});alert('Identity.md 已保存')}
+async function deleteAgent(name){if(!confirm('删除 Agent '+name+'?'))return;await api(`/api/agents/${name}`,{method:'DELETE'});closeModal();renderAgents()}
+function closeModal(){$('modalContainer').innerHTML=''}
+
+// ========== Platforms ==========
+async function renderPlatforms(){
+  const ps=await api('/api/platforms');
+  const icons={telegram:'📱',discord:'🎮',feishu:'🐦',qq:'🐧',wechat:'💚'};
+  let html='<div class="grid">';
+  for(const p of ps){
+    html+=`<div class="card"><div class="flex justify-between items-center">
+      <h3 style="color:var(--text)">${icons[p.name]||''} ${p.name}</h3>
+      <span class="badge ${p.enabled?'badge-green':'badge-red'}">${p.enabled?'已启用':'未启用'}</span>
+    </div>
+    <p style="font-size:13px;color:var(--text2);margin-top:8px">Token: ${p.token_set?'已配置':'未配置'}</p>
+    <div class="mt-8">
+      <button class="btn btn-sm ${p.enabled?'btn-danger':'btn-success'}" onclick="togglePlatform('${p.name}',${!p.enabled})">
+        ${p.enabled?'停用':'启用'}
+      </button>
+    </div></div>`;
+  }
+  html+='</div>';
+  $('content').innerHTML=html;
+}
+async function togglePlatform(name,enable){await api(`/api/platforms/${name}`,{method:'PUT',body:JSON.stringify({enabled})});renderPlatforms()}
+
+// ========== Sessions ==========
+async function renderSessions(){
+  const ss=await api('/api/sessions');
+  let html='<table><tr><th>会话 ID</th><th>消息数</th><th>最后活动</th><th>操作</th></tr>';
+  for(const s of ss){
+    html+=`<tr><td>${s.id}</td><td>${s.messages}</td><td>${s.last?.slice(0,19)||''}</td>
+      <td><button class="btn btn-sm btn-ghost" onclick="viewSession('${s.id}')">查看</button>
+      <button class="btn btn-sm btn-danger" onclick="clearSession('${s.id}')">清除</button></td></tr>`;
+  }
+  html+='</table>';
+  if(!ss.length)html='<div class="empty">暂无会话</div>';
+  $('content').innerHTML=html;
+}
+async function viewSession(sid){
+  const msgs=await api(`/api/sessions/${sid}/messages`);
+  let html='<h3 style="margin-bottom:12px">会话: '+sid+'</h3><div class="log-viewer" style="max-height:400px">';
+  for(const m of msgs){html+=`<div><span class="${m.role==='user'?'INFO':'WARNING'}">[${m.role}]</span> ${m.content.slice(0,300)}</div>`;}
+  html+='</div><button class="btn btn-ghost mt-8" onclick="renderSessions()">返回</button>';
+  $('content').innerHTML=html;
+}
+async function clearSession(sid){await api(`/api/sessions/${sid}`,{method:'DELETE'});renderSessions()}
+
+// ========== Memory ==========
+async function renderMemory(){
+  const stats=await api('/api/memory/stats');
+  const lt=await api('/api/memory/long-term');
+  let html=`<div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px">
+    <div class="stat"><div class="label">总计</div><div class="value">${stats.total_count||0}</div></div>
+    <div class="stat"><div class="label">短期</div><div class="value">${stats.short_term_count||0}</div></div>
+    <div class="stat"><div class="label">工作</div><div class="value">${stats.working_count||0}</div></div>
+    <div class="stat"><div class="label">长期</div><div class="value">${stats.long_term_count||0}</div></div>
+  </div>`;
+  html+='<div class="flex gap-8 mb-16"><input id="memSearch" placeholder="搜索记忆..." onkeydown="if(event.key===\'Enter\')searchMemory()" style="max-width:400px"><button class="btn btn-primary" onclick="searchMemory()">搜索</button><button class="btn btn-ghost" onclick="cleanupMemory()">清理过期</button></div>';
+  html+='<h3 style="margin-bottom:8px">长期记忆</h3><table><tr><th>Key</th><th>内容</th><th>重要性</th><th></th></tr>';
+  for(const e of lt){
+    html+=`<tr><td>${e.key||''}</td><td>${(e.content||e.summary||'').slice(0,150)}</td><td>${e.importance||''}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="deleteMemory('${e.id}')">删除</button></td></tr>`;
+  }
+  html+='</table>';
+  if(!lt.length)html+='<div class="empty">暂无长期记忆</div>';
+  $('content').innerHTML=html;
+}
+async function searchMemory(){
+  const q=$('memSearch').value;if(!q)return;
+  const r=await api('/api/memory/search?q='+encodeURIComponent(q));
+  let html='<h3>搜索结果: '+r.length+' 条</h3><table><tr><th>Key</th><th>内容</th><th>分类</th></tr>';
+  for(const e of r){html+=`<tr><td>${e.key||''}</td><td>${(e.content||'').slice(0,200)}</td><td>${e.category||''}</td></tr>`;}
+  html+='</table><button class="btn btn-ghost mt-8" onclick="renderMemory()">返回</button>';
+  $('content').innerHTML=html;
+}
+async function deleteMemory(id){await api(`/api/memory/long-term/${id}`,{method:'DELETE'});renderMemory()}
+async function cleanupMemory(){const r=await api('/api/memory/cleanup',{method:'POST'});alert('清理了 '+r.cleaned+' 条');renderMemory()}
+
+// ========== LLM ==========
+async function renderLLM(){
+  const c=await api('/api/llm');const u=await api('/api/llm/usage');
+  let html=`<div class="card"><h3>模型配置</h3>
+    <div class="grid" style="grid-template-columns:1fr 1fr">
+      <div class="form-group"><label>Provider</label><select id="llmProvider">
+        <option ${c.provider==='openai'?'selected':''}>openai</option>
+        <option ${c.provider==='anthropic'?'selected':''}>anthropic</option>
+        <option ${c.provider==='ollama'?'selected':''}>ollama</option>
+        <option ${c.provider==='zhipu'?'selected':''}>zhipu</option></select></div>
+      <div class="form-group"><label>模型</label><input id="llmModel" value="${c.model||''}"></div>
+      <div class="form-group"><label>Base URL</label><input id="llmUrl" value="${c.base_url||''}"></div>
+      <div class="form-group"><label>API Key</label><input id="llmKey" type="password" value="" placeholder="${c.api_key_set?'已配置（留空不修改）':'未配置'}"></div>
+      <div class="form-group"><label>Temperature</label><input id="llmTemp" type="number" step="0.1" value="${c.temperature||0.7}"></div>
+      <div class="form-group"><label>Max Tokens</label><input id="llmMaxTokens" type="number" value="${c.max_tokens||4096}"></div>
+    </div>
+    <div class="flex gap-8 mt-16">
+      <button class="btn btn-primary" onclick="saveLLM()">保存配置</button>
+      <button class="btn btn-success" onclick="testLLM()">测试连接</button>
+    </div>
+  </div>`;
+  html+=`<div class="card"><h3>用量统计</h3>
+    <div class="grid" style="grid-template-columns:repeat(4,1fr)">
+      <div class="stat"><div class="label">调用次数</div><div class="value">${u.call_count||0}</div></div>
+      <div class="stat"><div class="label">Prompt Tokens</div><div class="value">${u.total_prompt_tokens||0}</div></div>
+      <div class="stat"><div class="label">Completion Tokens</div><div class="value">${u.total_completion_tokens||0}</div></div>
+      <div class="stat"><div class="label">估算费用</div><div class="value">$${(u.total_cost_usd||0).toFixed(4)}</div></div>
+    </div></div>`;
+  $('content').innerHTML=html;
+}
+async function saveLLM(){
+  await api('/api/llm',{method:'PUT',body:JSON.stringify({
+    provider:$('llmProvider').value,model:$('llmModel').value,base_url:$('llmUrl').value,
+    temperature:parseFloat($('llmTemp').value),max_tokens:parseInt($('llmMaxTokens').value),
+    api_key:$('llmKey').value||undefined
+  })});alert('已保存');
+}
+async function testLLM(){
+  const btn=event.target;btn.textContent='测试中...';btn.disabled=true;
+  const r=await api('/api/llm/test',{method:'POST'});
+  btn.textContent='测试连接';btn.disabled=false;
+  alert(r.ok?'连接成功: '+r.response:'连接失败: '+r.error);
+}
+
+// ========== Skills ==========
+async function renderSkills(){
+  const sk=await api('/api/skills');
+  let html=`<p style="color:var(--text2);margin-bottom:16px">共 ${sk.length} 个技能已注册</p>`;
+  html+='<div class="grid">';
+  for(const s of sk){
+    const src=s.source||'builtin';
+    html+=`<div class="card">
+      <div class="flex justify-between items-center">
+        <h3 style="color:var(--text)">${s.name}</h3>
+        <span class="badge ${src==='openclaw_external'?'badge-yellow':'badge-green'}">${src==='openclaw_external'?'OpenClaw':'内置'}</span>
+      </div>
+      <p style="font-size:13px;color:var(--text2);margin-top:6px">${(s.description||'').slice(0,100)}</p>
+      ${s.dangerous?'<span class="badge badge-red mt-8">⚠️ 危险操作</span>':''}
+    </div>`;
+  }
+  html+='</div>';
+  $('content').innerHTML=html;
+}
+
+// ========== Files ==========
+async function renderFiles(){
+  const wd=await api('/api/workdir');const files=await api('/api/workdir/files');
+  let html=`<div class="flex items-center gap-8 mb-16">
+    <span style="font-size:14px;color:var(--text2)">工作目录: ${wd.path}</span>
+    <button class="btn btn-sm btn-ghost" onclick="changeWorkdir()">更改</button>
+    <button class="btn btn-sm btn-ghost" onclick="renderFiles()">刷新</button>
+  </div>`;
+  html+='<table><tr><th>名称</th><th>类型</th><th>大小</th></tr>';
+  for(const f of files){
+    const icon=f.type==='dir'?'📁':'📄';
+    const size=f.type==='file'?(f.size>1024?(f.size/1024).toFixed(1)+'KB':f.size+'B'):'-';
+    html+=`<tr><td>${icon} ${f.name}</td><td>${f.type}</td><td>${size}</td></tr>`;
+  }
+  if(!files.length)html+='<tr><td colspan="3" class="empty">目录为空</td></tr>';
+  html+='</table>';
+  $('content').innerHTML=html;
+}
+async function changeWorkdir(){
+  const p=prompt('新路径:');if(!p)return;
+  await api('/api/workdir',{method:'PUT',body:JSON.stringify({path:p})});renderFiles();
+}
+
+// ========== Logs ==========
+async function renderLogs(){
+  let html=`<div class="flex gap-8 mb-16">
+    <select id="logLines" style="width:auto"><option value="100">100 行</option><option value="500" selected>500 行</option><option value="1000">1000 行</option></select>
+    <button class="btn btn-primary" onclick="loadLogs()">刷新</button>
+    <button class="btn btn-ghost" onclick="toggleLogStream()" id="streamBtn">实时日志</button>
+  </div>
+  <div class="log-viewer" id="logViewer" style="height:calc(100vh - 220px)">加载中...</div>`;
+  $('content').innerHTML=html;
+  loadLogs();
+}
+
+async function loadLogs(){
+  const lines=$('logLines').value;
+  const logs=await api(`/api/logs?lines=${lines}`);
+  $('logViewer').innerHTML=logs.map(l=>`<div>${escHtml(l)}</div>`).join('');
+  $('logViewer').scrollTop=$('logViewer').scrollHeight;
+}
+
+let logStreamActive=false;
+async function toggleLogStream(){
+  if(logStreamActive){logStreamActive=false;$('streamBtn').textContent='实时日志';return;}
+  logStreamActive=true;$('streamBtn').textContent='停止实时';
+  const es=new EventSource(API+'/api/logs/stream');
+  es.onmessage=function(e){
+    try{
+      const lines=JSON.parse(e.data).split('\n');
+      for(const l of lines){$('logViewer').innerHTML+=`<div>${escHtml(l)}</div>`;}
+      $('logViewer').scrollTop=$('logViewer').scrollHeight;
+      while($('logViewer').children.length>2000)$('logViewer').removeChild($('logViewer').firstChild);
+    }catch(ex){}
+  };
+  es.onerror=function(){if(logStreamActive)setTimeout(()=>{},3000)};
+}
+
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// Init
+showPage('dashboard');
+setInterval(()=>{api('/api/status').catch(()=>{})},30000);
+</script>
+</body>
+</html>

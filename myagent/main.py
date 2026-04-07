@@ -431,14 +431,17 @@ class MyAgentApp:
 # 系统托盘
 # ==============================================================================
 
-def create_tray_icon(app: MyAgentApp):
+def create_tray_icon(app: MyAgentApp, web_port: int = 8765):
     """
     创建系统托盘图标。
 
     提供菜单:
+      - 打开管理后台
       - 显示状态
       - 打开日志
-      - 重启
+      - 打开工作目录
+      - 设置开机自启
+      - 后台运行
       - 退出
     """
     try:
@@ -462,6 +465,12 @@ def create_tray_icon(app: MyAgentApp):
         draw.arc([22, 28, 42, 42], 0, 180, fill="white", width=2)
         return img
 
+    def open_web_ui(icon, item):
+        """打开管理后台 Web UI"""
+        import webbrowser
+        url = f"http://127.0.0.1:{web_port}/ui/"
+        webbrowser.open(url)
+
     def open_logs(icon, item):
         import subprocess
         import platform
@@ -474,6 +483,19 @@ def create_tray_icon(app: MyAgentApp):
         else:
             subprocess.Popen(["xdg-open", log_dir])
 
+    def open_workdir(icon, item):
+        import subprocess
+        import platform
+        wd = str(app.config_mgr.data_dir / "workspace")
+        Path(wd).mkdir(parents=True, exist_ok=True)
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(wd)  # type: ignore
+        elif system == "Darwin":
+            subprocess.Popen(["open", wd])
+        else:
+            subprocess.Popen(["xdg-open", wd])
+
     def show_status(icon, item):
         if app.main_agent:
             stats = app.main_agent.get_stats()
@@ -483,6 +505,9 @@ def create_tray_icon(app: MyAgentApp):
         if app.task_queue:
             print(f"📋 队列: {app.task_queue.get_stats()}")
 
+    def toggle_autostart(icon, item):
+        setup_auto_start(not item.checked)
+
     def on_quit(icon, item):
         icon.stop()
         if app._running:
@@ -490,20 +515,26 @@ def create_tray_icon(app: MyAgentApp):
 
     icon_image = create_icon_image()
     menu = pystray.Menu(
-        pystray.MenuItem("MyAgent - 运行中", None, enabled=False),
+        pystray.MenuItem("🤖 MyAgent - 运行中", None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("🖥️  打开管理后台", open_web_ui,
+                          default=True),  # 双击托盘图标打开
         pystray.MenuItem("📋 显示状态", show_status),
-        pystray.MenuItem("📁 打开日志目录", open_logs),
+        pystray.MenuItem("📁 打开工作目录", open_workdir),
+        pystray.MenuItem("📄 打开日志目录", open_logs),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("🔄 开机自启", toggle_autostart, checked=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("⏸️  最小化到后台", None, enabled=False),
         pystray.MenuItem("❌ 退出", on_quit),
     )
 
-    return pystray.Icon("myagent", icon_image, "MyAgent", menu)
+    return pystray.Icon("myagent", icon_image, "MyAgent AI 助手", menu)
 
 
-def run_with_tray(app: MyAgentApp):
+def run_with_tray(app: MyAgentApp, web_port: int = 8765):
     """在系统托盘中运行 MyAgent"""
-    tray = create_tray_icon(app)
+    tray = create_tray_icon(app, web_port)
     if tray is None:
         app.logger.warning("pystray 未安装，跳过系统托盘")
         return
@@ -511,7 +542,7 @@ def run_with_tray(app: MyAgentApp):
     # 在后台线程运行托盘
     tray_thread = threading.Thread(target=tray.run, daemon=True)
     tray_thread.start()
-    app.logger.info("系统托盘已启动")
+    app.logger.info(f"系统托盘已启动 (管理后台: http://127.0.0.1:{web_port}/ui/)")
 
 
 # ==============================================================================
@@ -627,6 +658,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="MyAgent - 本地桌面端执行型AI助手")
     parser.add_argument("--tray", action="store_true", help="以系统托盘模式运行")
+    parser.add_argument("--web", type=int, nargs="?", const=8765, default=None,
+                        help="启动管理后台 Web UI (可选端口，默认8765)")
+    parser.add_argument("--port", type=int, default=8765, help="Web UI 端口")
     parser.add_argument("--autostart", action="store_true", help="设置开机自启")
     parser.add_argument("--no-autostart", action="store_true", help="取消开机自启")
     parser.add_argument("--config", type=str, help="指定配置文件路径")
@@ -651,6 +685,7 @@ def main():
 
     # 创建应用
     app = MyAgentApp()
+    web_port = args.web if args.web else args.port if args.tray else None
 
     # 信号处理
     def signal_handler(sig, frame):
@@ -666,15 +701,22 @@ def main():
     async def run():
         await app.initialize()
 
-        # 系统托盘
-        if args.tray:
-            run_with_tray(app)
+        # Web 管理后台
+        api_server = None
+        if web_port:
+            from web.api_server import ApiServer
+            api_server = ApiServer(app)
+            await api_server.start(port=web_port)
+            app.logger.info(f"管理后台: http://127.0.0.1:{web_port}/ui/")
+
+        # 系统托盘 (默认开启管理后台)
+        if args.tray or web_port:
+            run_with_tray(app, web_port)
 
         # 启动聊天平台(后台)
         if app.chat_manager:
             asyncio.create_task(app.chat_manager.start_all())
 
-        # CLI / 托盘模式
         if args.tray:
             # 托盘模式: 后台等待
             app.logger.info("后台运行中... (Ctrl+C 退出)")
@@ -685,6 +727,8 @@ def main():
             await app.run_cli()
 
         await app.shutdown()
+        if api_server:
+            await api_server.stop()
 
     try:
         asyncio.run(run())
