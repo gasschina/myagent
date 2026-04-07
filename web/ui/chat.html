@@ -560,6 +560,22 @@ input,textarea,select{font:inherit}
 .agent-tree-node[data-depth="3"]{margin-left:36px}
 .agent-tree-node[data-depth="4"]{margin-left:48px}
 
+/* ── Platform badge in agent cards ── */
+.platform-badge{
+  font-size:11px;white-space:nowrap;flex-shrink:0;
+  display:inline-flex;align-items:center;
+}
+
+/* ── Agent form section (e.g. platform binding) ── */
+.agent-form-section{
+  margin:16px 0;padding:14px 16px;border-radius:var(--radius-sm);
+  background:var(--bg);border:1px solid var(--border-light);
+}
+.agent-form-section-title{
+  font-size:12px;font-weight:700;color:var(--text);
+  margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px;
+}
+
 /* ══════════════════════════════════════════════════════
    ── Config Modal ──
    ══════════════════════════════════════════════════════ */
@@ -798,6 +814,15 @@ const state = {
   agentSessions: {},     // {agentPath: [{id, name, messages, last}]}
   agentDetails: {},      // {agentPath: {soul, identity, model, ...}}
   expandedNodes: new Set(['default']),  // 树形展开状态
+  modelsLibrary: [],     // 模型库 [{id, name, provider, model, base_url, enabled, has_api_key, ...}]
+};
+
+// ── 平台图标映射 ──
+const PLATFORM_ICONS = {
+  telegram: '✈️', discord: '🎮', feishu: '🐦', qq: '🐧', wechat: '💬',
+};
+const PLATFORM_LABELS = {
+  telegram: 'Telegram', discord: 'Discord', feishu: '飞书', qq: 'QQ', wechat: '微信',
 };
 
 // ── Utility: deterministic color from agent name ──
@@ -832,6 +857,7 @@ function getAgentGradient(name) {
 
 // ── Init ──
 document.addEventListener('DOMContentLoaded', () => {
+  loadModels();
   loadAgents();
   loadStatus();
   // Enable/disable send button
@@ -839,6 +865,16 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('sendBtn').disabled = !this.value.trim();
   });
 });
+
+// ── Model Library ──
+async function loadModels() {
+  try {
+    var data = await api('/api/models');
+    state.modelsLibrary = data || [];
+  } catch (e) {
+    state.modelsLibrary = [];
+  }
+}
 
 // ── API Calls ──
 async function api(url, options = {}) {
@@ -964,7 +1000,22 @@ function renderTreeNodes(nodes, depth) {
     var avatarContent = emoji || initials;
     var colorStyle = n.avatar_color ? 'background:' + n.avatar_color : '';
     var colorClass = n.avatar_color ? '' : getAgentColorClass(n.name);
-    var modelShort = (n.model || '').split('/').pop() || '';
+    // 模型名称：优先使用 model_info.name，其次 model 字段
+    var modelDisplayName = '';
+    if (n.model_info && n.model_info.name) {
+      modelDisplayName = n.model_info.name;
+    } else if (n.model) {
+      modelDisplayName = n.model.split('/').pop();
+    } else if (n.model_id) {
+      var found = state.modelsLibrary.find(function(m) { return m.id === n.model_id; });
+      if (found) modelDisplayName = found.name || found.id;
+      else modelDisplayName = n.model_id;
+    }
+    // 平台图标
+    var platformBadge = '';
+    if (n.platform && PLATFORM_ICONS[n.platform]) {
+      platformBadge = '<span class="platform-badge" title="' + escapeHtml(PLATFORM_LABELS[n.platform] || n.platform) + '">' + PLATFORM_ICONS[n.platform] + '</span>';
+    }
     var execMode = n.execution_mode || 'sandbox';
     var execLabel = execMode === 'local' ? '本机' : '沙盒';
     var execClass = execMode === 'local' ? 'local' : 'sandbox';
@@ -980,7 +1031,8 @@ function renderTreeNodes(nodes, depth) {
     }
     html += '<div class="agent-avatar ' + colorClass + '" style="' + colorStyle + avatarSize + '">' + avatarContent + '<span class="status-dot" style="' + dotSize + '"></span></div>';
     html += '<div class="agent-info"><div class="agent-name">' + escapeHtml(n.name);
-    if (modelShort) html += '<span class="model-tag">' + escapeHtml(modelShort) + '</span>';
+    if (modelDisplayName) html += '<span class="model-tag">' + escapeHtml(modelDisplayName) + '</span>';
+    if (platformBadge) html += platformBadge;
     html += '<span class="exec-badge ' + execClass + '" title="执行模式: ' + execLabel + '">' + execLabel + '</span>';
     html += '</div>';
     if (n.description) html += '<div class="agent-desc">' + escapeHtml(n.description) + '</div>';
@@ -1076,6 +1128,10 @@ function showCreateChildModal(parentPath) {
 }
 
 async function showEditAgentModal(agentPath) {
+  // 刷新模型库以确保下拉框最新
+  await loadModels();
+  // 清除缓存以获取最新数据
+  delete state.agentDetails[agentPath];
   var details = await loadAgentDetails(agentPath);
   var agent = findAgentByPath(agentPath);
   var merged = agent ? Object.assign({}, agent, details) : details;
@@ -1089,15 +1145,29 @@ function showAgentModal(editPath, parentPath, data) {
   var path = data.path || editPath || '';
   var name = data.name || '';
   var model = data.model || '';
+  var model_id = data.model_id || '';
   var description = data.description || '';
   var soul = data.soul || '';
   var identity = data.identity || '';
   var avatar_emoji = data.avatar_emoji || '';
   var execution_mode = data.execution_mode || (isEdit ? 'sandbox' : (parentPath ? 'sandbox' : 'local'));
+  var platform = data.platform || '';
+  var platform_token = data.platform_token || '';
+  var platform_app_id = data.platform_app_id || '';
+  var platform_app_secret = data.platform_app_secret || '';
 
   var emojis = ['🤖','🧠','💡','🎯','🔮','⚡','🌟','🎨','📝','🔧','🎭','🌐','🦊','🐱','🐶','🦁'];
   var title = isEdit ? '⚙️ 编辑 Agent' : (isChild ? '👶 创建子 Agent (' + escapeHtml(parentPath) + ')' : '✨ 创建新 Agent');
   var subtitle = isEdit ? '修改 ' + escapeHtml(editPath) + ' 的配置' : (isChild ? '在 ' + escapeHtml(parentPath) + ' 下创建子 Agent' : '配置一个新的顶级 AI Agent');
+
+  // 构建模型选择下拉框
+  var modelsOptions = '<option value="">系统默认</option>';
+  var enabledModels = state.modelsLibrary.filter(function(m) { return m.enabled; });
+  for (var mi = 0; mi < enabledModels.length; mi++) {
+    var m = enabledModels[mi];
+    var selected = (model_id === m.id) ? ' selected' : '';
+    modelsOptions += '<option value="' + escapeHtml(m.id) + '"' + selected + '>' + escapeHtml(m.name) + ' (' + escapeHtml(m.provider) + ')</option>';
+  }
 
   var container = document.getElementById('agentModalContainer');
   container.innerHTML = '<div class="modal-overlay" onclick="if(event.target===this)closeAgentModal()"><div class="agent-modal">'
@@ -1107,8 +1177,8 @@ function showAgentModal(editPath, parentPath, data) {
     + '<input type="text" id="agentFormName" placeholder="例如: translator, coder, tutor" value="' + escapeHtml(name) + '" ' + (isEdit ? 'readonly style="opacity:.6;cursor:not-allowed"' : '') + '>'
     + '<div class="hint">' + (isEdit ? '名称不可修改' : '使用英文小写，可用连字符') + '</div></div>'
     + '<div class="agent-form-group"><label>模型</label>'
-    + '<input type="text" id="agentFormModel" placeholder="例如: openai/gpt-4o, anthropic/claude-3.5-sonnet" value="' + escapeHtml(model) + '">'
-    + '<div class="hint">留空则使用系统默认模型</div></div>'
+    + '<select id="agentFormModelId" onchange="onModelSelect()">' + modelsOptions + '</select>'
+    + '<div class="hint" id="modelHint">从系统模型库中选择，留空使用系统默认模型</div></div>'
     + '<div class="agent-form-group"><label>头像</label>'
     + '<div class="agent-avatar-picker" id="avatarPicker">'
     + emojis.map(function(e) { return '<div class="agent-avatar-option ' + (avatar_emoji === e ? 'selected' : '') + '" onclick="pickAvatar(this,\'' + e + '\')" data-emoji="' + e + '">' + e + '</div>'; }).join('')
@@ -1122,6 +1192,27 @@ function showAgentModal(editPath, parentPath, data) {
     + '<option value="sandbox"' + (execution_mode === 'sandbox' ? ' selected' : '') + '>📦 沙盒执行 (Docker 隔离，更安全)</option>'
     + '</select>'
     + '<div class="hint">默认 Agent 为本机模式，其他默认沙盒模式</div></div>'
+    + '<div class="agent-form-section"><div class="agent-form-section-title">🔗 聊天平台绑定</div>'
+    + '<div class="agent-form-group"><label>聊天平台</label>'
+    + '<select id="agentFormPlatform" onchange="onPlatformSelect()">'
+    + '<option value=""' + (!platform ? ' selected' : '') + '>无 (本地 Web)</option>'
+    + '<option value="telegram"' + (platform === 'telegram' ? ' selected' : '') + '>✈️ Telegram</option>'
+    + '<option value="discord"' + (platform === 'discord' ? ' selected' : '') + '>🎮 Discord</option>'
+    + '<option value="feishu"' + (platform === 'feishu' ? ' selected' : '') + '>🐦 飞书</option>'
+    + '<option value="qq"' + (platform === 'qq' ? ' selected' : '') + '>🐧 QQ</option>'
+    + '<option value="wechat"' + (platform === 'wechat' ? ' selected' : '') + '>💬 微信</option>'
+    + '</select>'
+    + '<div class="hint">选择 Agent 对接的聊天平台</div></div>'
+    + '<div class="agent-form-group" id="platformTokenGroup" style="display:' + (platform ? '' : 'none') + '"><label>平台 Token</label>'
+    + '<input type="text" id="agentFormPlatformToken" placeholder="Bot Token" value="' + escapeHtml(platform_token) + '">'
+    + '<div class="hint">聊天平台的 Bot Token</div></div>'
+    + '<div class="agent-form-group" id="platformAppIdGroup" style="display:' + (platform === 'feishu' ? '' : 'none') + '"><label>App ID</label>'
+    + '<input type="text" id="agentFormPlatformAppId" placeholder="飞书 App ID" value="' + escapeHtml(platform_app_id) + '">'
+    + '<div class="hint">飞书应用的 App ID</div></div>'
+    + '<div class="agent-form-group" id="platformAppSecretGroup" style="display:' + (platform === 'feishu' ? '' : 'none') + '"><label>App Secret</label>'
+    + '<input type="text" id="agentFormPlatformAppSecret" placeholder="飞书 App Secret" value="' + escapeHtml(platform_app_secret) + '">'
+    + '<div class="hint">飞书应用的 App Secret</div></div>'
+    + '</div>'
     + '<div class="agent-form-group"><label>Identity (身份)</label>'
     + '<textarea id="agentFormIdentity" placeholder="你是一个... 你擅长... 你的风格是..." rows="3">' + escapeHtml(identity) + '</textarea>'
     + '<div class="hint">定义 Agent 的身份和角色</div></div>'
@@ -1148,6 +1239,37 @@ function pickAvatar(el, emoji) {
   document.getElementById('agentFormEmoji').value = emoji;
 }
 
+function onModelSelect() {
+  var sel = document.getElementById('agentFormModelId');
+  var hint = document.getElementById('modelHint');
+  if (!sel || !hint) return;
+  var modelId = sel.value;
+  if (!modelId) {
+    hint.textContent = '从系统模型库中选择，留空使用系统默认模型';
+    return;
+  }
+  var found = state.modelsLibrary.find(function(m) { return m.id === modelId; });
+  if (found) {
+    var details = found.provider;
+    if (found.base_url) details += ' | ' + found.base_url;
+    if (found.model && found.model !== found.id) details += ' | 模型: ' + found.model;
+    hint.textContent = '提供商: ' + details;
+  } else {
+    hint.textContent = '模型: ' + modelId;
+  }
+}
+
+function onPlatformSelect() {
+  var sel = document.getElementById('agentFormPlatform');
+  var platform = sel ? sel.value : '';
+  var tokenGroup = document.getElementById('platformTokenGroup');
+  var appIdGroup = document.getElementById('platformAppIdGroup');
+  var appSecretGroup = document.getElementById('platformAppSecretGroup');
+  if (tokenGroup) tokenGroup.style.display = platform ? '' : 'none';
+  if (appIdGroup) appIdGroup.style.display = (platform === 'feishu') ? '' : 'none';
+  if (appSecretGroup) appSecretGroup.style.display = (platform === 'feishu') ? '' : 'none';
+}
+
 function closeAgentModal() {
   document.getElementById('agentModalContainer').innerHTML = '';
 }
@@ -1159,12 +1281,16 @@ async function saveAgentModal(editPath, parentPath) {
   var isChild = ctx.isChild;
 
   var nameEl = document.getElementById('agentFormName');
-  var modelEl = document.getElementById('agentFormModel');
+  var modelIdEl = document.getElementById('agentFormModelId');
   var descEl = document.getElementById('agentFormDesc');
   var identityEl = document.getElementById('agentFormIdentity');
   var soulEl = document.getElementById('agentFormSoul');
   var emojiEl = document.getElementById('agentFormEmoji');
   var execEl = document.getElementById('agentFormExecMode');
+  var platformEl = document.getElementById('agentFormPlatform');
+  var platformTokenEl = document.getElementById('agentFormPlatformToken');
+  var platformAppIdEl = document.getElementById('agentFormPlatformAppId');
+  var platformAppSecretEl = document.getElementById('agentFormPlatformAppSecret');
 
   var name = nameEl.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
   if (!name) { toast('请输入有效的 Agent 名称', 'error'); return; }
@@ -1172,13 +1298,29 @@ async function saveAgentModal(editPath, parentPath) {
 
   var payload = {
     name: name,
-    model: modelEl.value.trim(),
     description: descEl.value.trim(),
     identity: identityEl.value.trim(),
     soul: soulEl.value.trim(),
     avatar_emoji: emojiEl.value,
     execution_mode: execEl.value,
   };
+  // 模型选择
+  if (modelIdEl && modelIdEl.value) {
+    payload.model_id = modelIdEl.value;
+  }
+  // 平台绑定
+  if (platformEl && platformEl.value) {
+    payload.platform = platformEl.value;
+    if (platformTokenEl && platformTokenEl.value.trim()) {
+      payload.platform_token = platformTokenEl.value.trim();
+    }
+    if (platformAppIdEl && platformAppIdEl.value.trim()) {
+      payload.platform_app_id = platformAppIdEl.value.trim();
+    }
+    if (platformAppSecretEl && platformAppSecretEl.value.trim()) {
+      payload.platform_app_secret = platformAppSecretEl.value.trim();
+    }
+  }
 
   try {
     if (isEdit) {

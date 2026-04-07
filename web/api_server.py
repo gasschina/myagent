@@ -10,6 +10,7 @@ from typing import Optional
 from aiohttp import web
 from core.logger import get_logger
 from core.llm import Message
+from config import ModelEntry
 import datetime
 
 logger = get_logger("myagent.api")
@@ -51,6 +52,13 @@ class ApiServer:
         r.add_post("/api/agents/{name:[a-zA-Z0-9_/-]+}/children", self.handle_create_child)
         r.add_get("/api/platforms", self.handle_list_platforms)
         r.add_put("/api/platforms/{name}", self.handle_update_platform)
+        # ── 模型库 CRUD ──
+        r.add_get("/api/models", self.handle_list_models)
+        r.add_post("/api/models", self.handle_add_model)
+        r.add_put("/api/models/{model_id}", self.handle_update_model)
+        r.add_delete("/api/models/{model_id}", self.handle_delete_model)
+        # ── Agent 绑定查询 ──
+        r.add_get("/api/agents/{name:[a-zA-Z0-9_/-]+}/bindings", self.handle_agent_bindings)
         r.add_get("/api/sessions", self.handle_list_sessions)
         r.add_get("/api/sessions/{sid}/messages", self.handle_get_messages)
         r.add_delete("/api/sessions/{sid}", self.handle_clear_session)
@@ -106,7 +114,63 @@ class ApiServer:
         session_id = f"{agent_path}_{raw_session_id}"
 
         try:
-            response = await self.core.process_message(message, session_id)
+            # 检查 Agent 是否指定了特定模型
+            agent_cfg = self._read_agent_config(agent_path)
+            if agent_cfg and (agent_cfg.get("model_id") or agent_cfg.get("model")):
+                model_id = agent_cfg.get("model_id")
+                model_cfg_override = None
+                if model_id:
+                    # 从模型库查找
+                    for me in self.core.config.models_library:
+                        if me.id == model_id:
+                            model_cfg_override = {
+                                "provider": me.provider or self.core.config.llm.provider,
+                                "model": me.model or model_id,
+                                "base_url": me.base_url or self.core.config.llm.base_url,
+                                "api_key": me.api_key or self.core.config.llm.api_key,
+                                "temperature": me.temperature,
+                                "max_tokens": me.max_tokens,
+                            }
+                            break
+                if not model_cfg_override and agent_cfg.get("model"):
+                    # 兼容旧的 model 字段
+                    model_cfg_override = {
+                        "model": agent_cfg["model"],
+                    }
+                if model_cfg_override and self.core.llm:
+                    # 临时切换模型参数用于本次请求
+                    orig_provider = self.core.llm.provider
+                    orig_model = self.core.llm.model
+                    orig_base_url = self.core.llm.base_url
+                    orig_api_key = self.core.llm.api_key
+                    orig_temp = self.core.llm.temperature
+                    orig_max_tokens = self.core.llm.max_tokens
+                    try:
+                        if "provider" in model_cfg_override:
+                            self.core.llm.provider = model_cfg_override["provider"]
+                        if "model" in model_cfg_override:
+                            self.core.llm.model = model_cfg_override["model"]
+                        if "base_url" in model_cfg_override:
+                            self.core.llm.base_url = model_cfg_override["base_url"]
+                        if "api_key" in model_cfg_override:
+                            self.core.llm.api_key = model_cfg_override["api_key"]
+                        if "temperature" in model_cfg_override:
+                            self.core.llm.temperature = model_cfg_override["temperature"]
+                        if "max_tokens" in model_cfg_override:
+                            self.core.llm.max_tokens = model_cfg_override["max_tokens"]
+                        response = await self.core.process_message(message, session_id)
+                    finally:
+                        # 恢复原始模型配置
+                        self.core.llm.provider = orig_provider
+                        self.core.llm.model = orig_model
+                        self.core.llm.base_url = orig_base_url
+                        self.core.llm.api_key = orig_api_key
+                        self.core.llm.temperature = orig_temp
+                        self.core.llm.max_tokens = orig_max_tokens
+                else:
+                    response = await self.core.process_message(message, session_id)
+            else:
+                response = await self.core.process_message(message, session_id)
 
             # 保存到记忆
             if self.core.memory:
@@ -295,6 +359,17 @@ class ApiServer:
         }
         if "model" in data:
             cfg["model"] = data["model"]
+        # 平台绑定和模型库引用
+        if data.get("platform"):
+            cfg["platform"] = data["platform"]
+        if data.get("platform_token"):
+            cfg["platform_token"] = data["platform_token"]
+        if data.get("platform_app_id"):
+            cfg["platform_app_id"] = data["platform_app_id"]
+        if data.get("platform_app_secret"):
+            cfg["platform_app_secret"] = data["platform_app_secret"]
+        if data.get("model_id"):
+            cfg["model_id"] = data["model_id"]
 
         ad.mkdir(parents=True, exist_ok=True)
         (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
@@ -342,6 +417,17 @@ class ApiServer:
         }
         if "model" in data:
             cfg["model"] = data["model"]
+        # 平台绑定和模型库引用
+        if data.get("platform"):
+            cfg["platform"] = data["platform"]
+        if data.get("platform_token"):
+            cfg["platform_token"] = data["platform_token"]
+        if data.get("platform_app_id"):
+            cfg["platform_app_id"] = data["platform_app_id"]
+        if data.get("platform_app_secret"):
+            cfg["platform_app_secret"] = data["platform_app_secret"]
+        if data.get("model_id"):
+            cfg["model_id"] = data["model_id"]
 
         ad.mkdir(parents=True, exist_ok=True)
         (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
@@ -390,7 +476,19 @@ class ApiServer:
         for d in sorted(ad.iterdir()):
             if d.is_dir() and (d / "config.json").exists():
                 children.append(d.name)
-        return web.json_response({"path": path, **cfg, "soul": soul, "identity": identity, "user": user, "children": children})
+        # 如果有 model_id，解析为完整模型信息
+        model_info = None
+        model_id = cfg.get("model_id", "")
+        if model_id:
+            for me in self.core.config.models_library:
+                if me.id == model_id:
+                    model_info = {"id": me.id, "name": me.name, "provider": me.provider,
+                                 "model": me.model, "base_url": me.base_url, "enabled": me.enabled}
+                    break
+        result = {"path": path, **cfg, "soul": soul, "identity": identity, "user": user, "children": children}
+        if model_info:
+            result["model_info"] = model_info
+        return web.json_response(result)
 
     async def handle_update_agent(self, request):
         """PUT /api/agents/{path} - 更新 agent 配置"""
@@ -402,7 +500,8 @@ class ApiServer:
         cfg = json.loads((ad / "config.json").read_text())
         # 更新允许的字段
         for k in ("description", "avatar_color", "avatar_emoji", "model", "system_prompt",
-                   "execution_mode", "enabled", "sandbox_image", "sandbox_network", "sandbox_memory"):
+                   "execution_mode", "enabled", "sandbox_image", "sandbox_network", "sandbox_memory",
+                   "platform", "platform_token", "platform_app_id", "platform_app_secret", "model_id"):
             if k in data:
                 cfg[k] = data[k]
         (ad / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
@@ -502,6 +601,39 @@ class ApiServer:
                 return web.json_response({"ok": False, "error": f"切换到 {mode} 失败(Docker 不可用)"})
         logger.info(f"执行引擎配置已热更新: mode={data.get('execution_mode')}")
         return web.json_response({"ok": True, "hot_reload": True})
+
+    # --- Agent Bindings ---
+    async def handle_agent_bindings(self, request):
+        """GET /api/agents/{name}/bindings - 获取 Agent 的聊天平台绑定"""
+        path = request.match_info["name"]
+        cfg = self._read_agent_config(path)
+        if not cfg:
+            return web.json_response({"error": "not found"}, status=404)
+        bindings = {}
+        if cfg.get("platform"):
+            bindings["platform"] = cfg["platform"]
+        if cfg.get("platform_token"):
+            bindings["platform_token"] = cfg["platform_token"]
+        if cfg.get("platform_app_id"):
+            bindings["platform_app_id"] = cfg["platform_app_id"]
+        if cfg.get("platform_app_secret"):
+            bindings["platform_app_secret"] = cfg["platform_app_secret"]
+        # 模型绑定
+        if cfg.get("model_id"):
+            model_info = None
+            for me in self.core.config.models_library:
+                if me.id == cfg["model_id"]:
+                    model_info = {"id": me.id, "name": me.name, "provider": me.provider,
+                                 "model": me.model, "base_url": me.base_url, "enabled": me.enabled}
+                    break
+            if model_info:
+                bindings["model"] = model_info
+            else:
+                bindings["model_id"] = cfg["model_id"]
+                bindings["model"] = None
+        elif cfg.get("model"):
+            bindings["model"] = {"model": cfg["model"]}
+        return web.json_response(bindings)
 
     # --- Platforms ---
     async def handle_list_platforms(self, request):
@@ -633,6 +765,79 @@ class ApiServer:
 
     async def handle_llm_usage(self, request):
         return web.json_response(self.core.llm.get_usage_stats() if self.core.llm else {})
+
+    # --- Models Library ---
+    async def handle_list_models(self, request):
+        """GET /api/models - 列出模型库中所有模型"""
+        models = []
+        for m in self.core.config.models_library:
+            models.append({
+                "id": m.id, "name": m.name, "provider": m.provider,
+                "model": m.model, "base_url": m.base_url,
+                "max_tokens": m.max_tokens, "temperature": m.temperature,
+                "enabled": m.enabled,
+                "has_api_key": bool(m.api_key),
+            })
+        return web.json_response(models)
+
+    async def handle_add_model(self, request):
+        """POST /api/models - 添加模型到库"""
+        data = await request.json()
+        model_id = data.get("id", "").strip()
+        if not model_id:
+            return web.json_response({"error": "模型 ID 不能为空"}, status=400)
+        # 检查重复
+        for m in self.core.config.models_library:
+            if m.id == model_id:
+                return web.json_response({"error": f"模型 '{model_id}' 已存在"}, status=409)
+        entry = ModelEntry(
+            id=model_id,
+            name=data.get("name", model_id),
+            provider=data.get("provider", "openai"),
+            model=data.get("model", model_id),
+            base_url=data.get("base_url", ""),
+            api_key=data.get("api_key", ""),
+            max_tokens=data.get("max_tokens", 4096),
+            temperature=data.get("temperature", 0.1),
+            enabled=data.get("enabled", True),
+        )
+        self.core.config.models_library.append(entry)
+        self.core.config_mgr.save()
+        logger.info(f"添加模型到库: {model_id}")
+        return web.json_response({"ok": True, "id": model_id})
+
+    async def handle_update_model(self, request):
+        """PUT /api/models/{model_id} - 更新模型配置"""
+        model_id = request.match_info["model_id"]
+        data = await request.json()
+        found = False
+        for m in self.core.config.models_library:
+            if m.id == model_id:
+                for k in ("name", "provider", "model", "base_url", "max_tokens", "temperature", "enabled"):
+                    if k in data:
+                        setattr(m, k, data[k])
+                if data.get("api_key"):
+                    m.api_key = data["api_key"]
+                found = True
+                break
+        if not found:
+            return web.json_response({"error": f"模型 '{model_id}' 未找到"}, status=404)
+        self.core.config_mgr.save()
+        logger.info(f"更新模型库: {model_id}")
+        return web.json_response({"ok": True})
+
+    async def handle_delete_model(self, request):
+        """DELETE /api/models/{model_id} - 从库中删除模型"""
+        model_id = request.match_info["model_id"]
+        original_len = len(self.core.config.models_library)
+        self.core.config.models_library = [
+            m for m in self.core.config.models_library if m.id != model_id
+        ]
+        if len(self.core.config.models_library) == original_len:
+            return web.json_response({"error": f"模型 '{model_id}' 未找到"}, status=404)
+        self.core.config_mgr.save()
+        logger.info(f"从模型库删除: {model_id}")
+        return web.json_response({"ok": True})
 
     # --- Skills ---
     async def handle_list_skills(self, request):

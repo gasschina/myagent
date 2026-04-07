@@ -81,6 +81,20 @@ class TrayConfig:
 
 
 @dataclass
+class ModelEntry:
+    """模型库中的单个模型定义"""
+    id: str = ""                 # 唯一标识符，如 "gpt-4o", "claude-3.5-sonnet"
+    name: str = ""               # 显示名称
+    provider: str = ""            # openai | anthropic | ollama | zhipu | custom
+    model: str = ""               # API 调用使用的实际模型字符串
+    base_url: str = ""            # 自定义 Base URL（空=使用 provider 默认值）
+    api_key: str = ""             # 专用 API Key（空=使用全局默认值）
+    max_tokens: int = 4096
+    temperature: float = 0.1
+    enabled: bool = True
+
+
+@dataclass
 class ChatPlatformConfig:
     """单个聊天平台配置"""
     enabled: bool = False
@@ -102,6 +116,7 @@ class AppConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     tray: TrayConfig = field(default_factory=TrayConfig)
     chat_platforms: List[ChatPlatformConfig] = field(default_factory=list)
+    models_library: List[ModelEntry] = field(default_factory=list)
     log_level: str = "INFO"
     data_dir: str = ""                 # 数据目录，默认 ~/.myagent/
     language: str = "zh-CN"
@@ -266,6 +281,14 @@ class ConfigManager:
                     })
                     platforms.append(cp)
                 setattr(target, key, platforms)
+            elif isinstance(value, list) and key == "models_library":
+                models = []
+                for item in value:
+                    me = ModelEntry(**{
+                        k: v for k, v in item.items() if k in ModelEntry.__dataclass_fields__
+                    })
+                    models.append(me)
+                setattr(target, key, models)
             elif key in getattr(type(target), '__dataclass_fields__', {}):
                 setattr(target, key, value)
 
